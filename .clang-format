@@ -1,0 +1,16 @@
+BasedOnStyle: Microsoft
+IndentWidth: 4
+ColumnLimit: 120
+BreakBeforeBraces: Allman
+SortIncludes: Never
+IncludeBlocks: Preserve
+ReflowComments: false
+BreakStringLiterals: false
+FixNamespaceComments: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+SkipMacroDefinitionBody: true
+InsertBraces: false
+QualifierAlignment: Leave

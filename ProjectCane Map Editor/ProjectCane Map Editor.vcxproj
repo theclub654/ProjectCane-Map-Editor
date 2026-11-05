@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32"><Configuration>Debug</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32"><Configuration>Release</Configuration><Platform>Win32</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{3be77201-eb2a-43bc-bcaf-00fe79e3af5a}</ProjectGuid>
+    <RootNamespace>ProjectCaneMapEditor</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Release'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v143</PlatformToolset><WholeProgramOptimization>true</WholeProgramOptimization><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" /><ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets"><Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" /></ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Platform)'=='x64'"><OutDir>$(SolutionDir)x64\$(Configuration)\</OutDir><IntDir>$(ProjectDir)x64\$(Configuration)\obj\</IntDir></PropertyGroup>
+  <PropertyGroup Condition="'$(Platform)'=='Win32'"><OutDir>$(SolutionDir)Win32\$(Configuration)\</OutDir><IntDir>$(ProjectDir)Win32\$(Configuration)\obj\</IntDir></PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel><SDLCheck>true</SDLCheck><ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard><LanguageStandard_C>stdc17</LanguageStandard_C>
+      <AdditionalIncludeDirectories>$(SolutionDir)Libraries\include;$(SolutionDir)Libraries\include\imgui;$(SolutionDir)..\ProjectCane\Libraries\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link><SubSystem>Console</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation><AdditionalDependencies>opengl32.lib;Comdlg32.lib;winmm.lib;Shell32.lib;Ole32.lib;User32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile><PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+    <Link><StackReserveSize>67108864</StackReserveSize><AdditionalLibraryDirectories>$(SolutionDir)Libraries\lib\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>glfw3_debug.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
+    <ClCompile><FunctionLevelLinking>true</FunctionLevelLinking><IntrinsicFunctions>true</IntrinsicFunctions><PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+    <Link><EnableCOMDATFolding>true</EnableCOMDATFolding><OptimizeReferences>true</OptimizeReferences><AdditionalLibraryDirectories>$(SolutionDir)Libraries\lib\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>glfw3.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="AudioPreviewService.cpp" />
+    <ClCompile Include="SoundBank.cpp" />
+    <ClCompile Include="SoundManagerPanel.cpp" />
+    <ClCompile Include="ModelImport.cpp" />
+    <ClCompile Include="ufbx.c" />
+    <ClCompile Include="MapExport.cpp" />
+    <ClCompile Include="CharacterExport.cpp" />
+    <ClCompile Include="CreateObjectCatalogPanel.cpp" />
+    <ClCompile Include="PathZoneRuntime.cpp" />
+    <ClCompile Include="SmPreviewRuntime.cpp" />
+    <ClCompile Include="SpliceRuntime.cpp" />
+    <ClCompile Include="SpliceEventsPanel.cpp" />
+    <ClCompile Include="SpliceTutorialPanel.cpp" />
+    <ClCompile Include="ObjectOperationsPanel.cpp" />
+    <ClCompile Include="EditorTutorialsPanel.cpp" />
+    <ClCompile Include="WorldBuilderPanel.cpp" />
+    <ClCompile Include="AssetBrowserPanel.cpp" /><ClCompile Include="AssetDatabase.cpp" /><ClCompile Include="BrxCompiler.cpp" /><ClCompile Include="BrxDocument.cpp" /><ClCompile Include="BrxLoader.cpp" /><ClCompile Include="BrxSourceDocument.cpp" /><ClCompile Include="CameraRuntimePanel.cpp" /><ClCompile Include="CharacterStudioPanel.cpp" /><ClCompile Include="DialogManagerPanel.cpp" /><ClCompile Include="EditorApplication.cpp" /><ClCompile Include="EditorCamera.cpp" /><ClCompile Include="EditorDocumentOperations.cpp" /><ClCompile Include="EditorOptions.cpp" /><ClCompile Include="EditorProject.cpp" /><ClCompile Include="EditorTheme.cpp" /><ClCompile Include="EditorWorkspace.cpp" /><ClCompile Include="EmitterPreviewRuntime.cpp" /><ClCompile Include="GuidedObjectStudiosPanel.cpp" /><ClCompile Include="HubProgressionStudioPanel.cpp" /><ClCompile Include="ObjectTypeRegistry.cpp" /><ClCompile Include="PlatformDialogs.cpp" /><ClCompile Include="RenderShaders.cpp" /><ClCompile Include="ResolvedScene.cpp" /><ClCompile Include="RuntimePreviewWorld.cpp" /><ClCompile Include="SceneHierarchyPanel.cpp" /><ClCompile Include="SceneWorldPanel.cpp" /><ClCompile Include="TextureImport.cpp" /><ClCompile Include="TextureManagerPanel.cpp" /><ClCompile Include="TnCameraPanel.cpp" /><ClCompile Include="ValidationReport.cpp" /><ClCompile Include="ValidationSystem.cpp" /><ClCompile Include="glad.c" /><ClCompile Include="main.cpp" />
+    <ClCompile Include="$(SolutionDir)Libraries\include\imgui\imgui.cpp" /><ClCompile Include="$(SolutionDir)Libraries\include\imgui\imgui_draw.cpp" />
+    <ClCompile Include="$(SolutionDir)Libraries\include\imgui\imgui_impl_glfw.cpp" /><ClCompile Include="$(SolutionDir)Libraries\include\imgui\imgui_impl_opengl3.cpp" />
+    <ClCompile Include="$(SolutionDir)Libraries\include\imgui\imgui_tables.cpp" /><ClCompile Include="$(SolutionDir)Libraries\include\imgui\imgui_widgets.cpp" />
+  </ItemGroup>
+  <ItemGroup><ClInclude Include="AsegPreview.h" /><ClInclude Include="AssetBrowserPanel.h" /><ClInclude Include="AssetDatabase.h" /><ClInclude Include="BrxCompiler.h" /><ClInclude Include="BrxDocument.h" /><ClInclude Include="BrxLoader.h" /><ClInclude Include="BrxSourceDocument.h" /><ClInclude Include="CameraRuntimePanel.h" /><ClInclude Include="CharacterStudioPanel.h" /><ClInclude Include="DialogManagerPanel.h" /><ClInclude Include="EditorApplication.h" /><ClInclude Include="EditorCamera.h" /><ClInclude Include="EditorDocumentOperations.h" /><ClInclude Include="EditorOptions.h" /><ClInclude Include="EditorProject.h" /><ClInclude Include="EditorTheme.h" /><ClInclude Include="EditorWorkspace.h" /><ClInclude Include="EmitterPreviewRuntime.h" /><ClInclude Include="GuidedObjectStudiosPanel.h" /><ClInclude Include="HubProgressionStudioPanel.h" /><ClInclude Include="ObjectTypeRegistry.h" /><ClInclude Include="PlatformDialogs.h" /><ClInclude Include="RenderShaders.h" /><ClInclude Include="ResolvedScene.h" /><ClInclude Include="RuntimePreviewWorld.h" /><ClInclude Include="SceneRenderer.h" /><ClInclude Include="SceneHierarchyPanel.h" /><ClInclude Include="SceneWorldPanel.h" /><ClInclude Include="TextureImport.h" /><ClInclude Include="TextureManagerPanel.h" /><ClInclude Include="TnCameraPanel.h" /><ClInclude Include="ValidationReport.h" /><ClInclude Include="ValidationSystem.h" /></ItemGroup>
+  <ItemGroup><ClInclude Include="AudioPreviewService.h" /><ClInclude Include="CreateObjectCatalogPanel.h" /><ClInclude Include="EditorHistory.h" /><ClInclude Include="PathZoneRuntime.h" /><ClInclude Include="ProxyRuntime.h" /><ClInclude Include="SmPreviewRuntime.h" /><ClInclude Include="SpliceRuntime.h" /><ClInclude Include="SpliceEventsPanel.h" /><ClInclude Include="SpliceTutorialPanel.h" /><ClInclude Include="ObjectOperationsPanel.h" /><ClInclude Include="EditorTutorialsPanel.h" /><ClInclude Include="WorldBuilderPanel.h" /></ItemGroup>
+  <ItemGroup><ClCompile Include="PlacementTools.cpp" /><ClCompile Include="PrefabLibrary.cpp" /><ClCompile Include="ValidationPanel.cpp" /></ItemGroup>
+  <ItemGroup><ClCompile Include="ViewportPanel.cpp" /></ItemGroup>
+  <ItemGroup><ClCompile Include="InspectorPanel.cpp" /></ItemGroup>
+  <ItemGroup><ClCompile Include="ExitManagerPanel.cpp" /></ItemGroup>
+  <ItemGroup><ClInclude Include="PlacementTools.h" /><ClInclude Include="PrefabLibrary.h" /><ClInclude Include="ValidationPanel.h" /></ItemGroup>
+  <ItemGroup><ClInclude Include="ViewportPanel.h" /></ItemGroup>
+  <ItemGroup><ClInclude Include="VisibilityMap.h" /></ItemGroup>
+  <ItemGroup><ClInclude Include="InspectorPanel.h" /></ItemGroup>
+  <ItemGroup><ClInclude Include="ExitManagerPanel.h" /></ItemGroup>
+  <ItemGroup><ClCompile Include="SpeakerManagerPanel.cpp" /></ItemGroup>
+  <ItemGroup><ClInclude Include="SpeakerManagerPanel.h" /></ItemGroup>
+  <ItemGroup><ClInclude Include="SoundBank.h" /><ClInclude Include="SoundManagerPanel.h" /></ItemGroup>
+  <ItemGroup><ClInclude Include="ModelImport.h" /><ClInclude Include="$(SolutionDir)Libraries\include\ufbx.h" /></ItemGroup>
+  <ItemGroup><ClInclude Include="MapExport.h" /><ClInclude Include="CharacterExport.h" /></ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="Resources\AppIcon.rc">
+      <AdditionalIncludeDirectories>$(ProjectDir)Resources;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Image Include="Resources\ProjectCane.ico" />
+    <ClInclude Include="Resources\AppIcon.h" />
+    <None Include="Resources\ProjectCane-logo.png" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" /><ImportGroup Label="ExtensionTargets" />
+</Project>

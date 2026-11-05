@@ -1,0 +1,27 @@
+# Local Visual Studio state and generated builds; keep bundled Libraries/lib.
+.vs/
+/build/
+/x64/
+/Win32/
+/Debug/
+/Release/
+/ProjectCane Map Editor/x64/
+/ProjectCane Map Editor/Win32/
+/ProjectCane Map Editor/Debug/
+/ProjectCane Map Editor/Release/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+*.vcxproj.user
+*.suo
+*.VC.db
+*.VC.opendb
+*.obj
+*.pdb
+*.ilk
+*.tlog/
+*.log
+imgui.ini
+ProjectCaneMapEditor.ui

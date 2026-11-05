@@ -1,0 +1,396 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Application and Workspace">
+      <UniqueIdentifier>{DBF0A6D7-2A2C-54E6-AFDD-26B78C5157D0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Document and Native Format">
+      <UniqueIdentifier>{05DB7BCE-3F98-5D82-A737-6EA3BBA2F038}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Editor UI">
+      <UniqueIdentifier>{DCB99CF8-2F30-5904-9155-845B5A988F19}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Import and Export">
+      <UniqueIdentifier>{DB423E37-E0B6-5F50-A272-61FF5B4958CD}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Rendering and Visibility">
+      <UniqueIdentifier>{6C0893F9-36BD-50EC-9246-48816B7ACD6E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Runtime Preview and Audio">
+      <UniqueIdentifier>{BF1F21AE-E539-5D09-8234-457C686ABC80}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Third Party">
+      <UniqueIdentifier>{D7120741-9AC1-5CAF-88BA-05ECE81D93A0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Validation and Authoring Rules">
+      <UniqueIdentifier>{A41152D7-E2F2-57A9-9425-212EEADC59BB}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="$(SolutionDir)Libraries\include\imgui\imgui.cpp">
+      <Filter>Third Party</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)Libraries\include\imgui\imgui_draw.cpp">
+      <Filter>Third Party</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)Libraries\include\imgui\imgui_impl_glfw.cpp">
+      <Filter>Third Party</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)Libraries\include\imgui\imgui_impl_opengl3.cpp">
+      <Filter>Third Party</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)Libraries\include\imgui\imgui_tables.cpp">
+      <Filter>Third Party</Filter>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)Libraries\include\imgui\imgui_widgets.cpp">
+      <Filter>Third Party</Filter>
+    </ClCompile>
+    <ClCompile Include="AssetBrowserPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="AssetDatabase.cpp">
+      <Filter>Application and Workspace</Filter>
+    </ClCompile>
+    <ClCompile Include="AudioPreviewService.cpp">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="BrxCompiler.cpp">
+      <Filter>Document and Native Format</Filter>
+    </ClCompile>
+    <ClCompile Include="BrxDocument.cpp">
+      <Filter>Document and Native Format</Filter>
+    </ClCompile>
+    <ClCompile Include="BrxLoader.cpp">
+      <Filter>Document and Native Format</Filter>
+    </ClCompile>
+    <ClCompile Include="BrxSourceDocument.cpp">
+      <Filter>Document and Native Format</Filter>
+    </ClCompile>
+    <ClCompile Include="CameraRuntimePanel.cpp">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="CharacterExport.cpp">
+      <Filter>Import and Export</Filter>
+    </ClCompile>
+    <ClCompile Include="CharacterStudioPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="CreateObjectCatalogPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="DialogManagerPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="EditorApplication.cpp">
+      <Filter>Application and Workspace</Filter>
+    </ClCompile>
+    <ClCompile Include="EditorCamera.cpp">
+      <Filter>Rendering and Visibility</Filter>
+    </ClCompile>
+    <ClCompile Include="EditorDocumentOperations.cpp">
+      <Filter>Application and Workspace</Filter>
+    </ClCompile>
+    <ClCompile Include="EditorOptions.cpp">
+      <Filter>Application and Workspace</Filter>
+    </ClCompile>
+    <ClCompile Include="EditorProject.cpp">
+      <Filter>Application and Workspace</Filter>
+    </ClCompile>
+    <ClCompile Include="EditorTheme.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="EditorTutorialsPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="EditorWorkspace.cpp">
+      <Filter>Application and Workspace</Filter>
+    </ClCompile>
+    <ClCompile Include="EmitterPreviewRuntime.cpp">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="ExitManagerPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="GuidedObjectStudiosPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="HubProgressionStudioPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="InspectorPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="MapExport.cpp">
+      <Filter>Import and Export</Filter>
+    </ClCompile>
+    <ClCompile Include="ModelImport.cpp">
+      <Filter>Import and Export</Filter>
+    </ClCompile>
+    <ClCompile Include="ObjectOperationsPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="ObjectTypeRegistry.cpp">
+      <Filter>Application and Workspace</Filter>
+    </ClCompile>
+    <ClCompile Include="PathZoneRuntime.cpp">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="PlacementTools.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="PlatformDialogs.cpp">
+      <Filter>Application and Workspace</Filter>
+    </ClCompile>
+    <ClCompile Include="PrefabLibrary.cpp">
+      <Filter>Application and Workspace</Filter>
+    </ClCompile>
+    <ClCompile Include="RenderShaders.cpp">
+      <Filter>Rendering and Visibility</Filter>
+    </ClCompile>
+    <ClCompile Include="ResolvedScene.cpp">
+      <Filter>Application and Workspace</Filter>
+    </ClCompile>
+    <ClCompile Include="RuntimePreviewWorld.cpp">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="SceneHierarchyPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="SceneWorldPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="SmPreviewRuntime.cpp">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="SoundBank.cpp">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="SoundManagerPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="SpeakerManagerPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="SpliceEventsPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="SpliceRuntime.cpp">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="SpliceTutorialPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="TextureImport.cpp">
+      <Filter>Import and Export</Filter>
+    </ClCompile>
+    <ClCompile Include="TextureManagerPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="TnCameraPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="ValidationPanel.cpp">
+      <Filter>Validation and Authoring Rules</Filter>
+    </ClCompile>
+    <ClCompile Include="ValidationReport.cpp">
+      <Filter>Validation and Authoring Rules</Filter>
+    </ClCompile>
+    <ClCompile Include="ValidationSystem.cpp">
+      <Filter>Validation and Authoring Rules</Filter>
+    </ClCompile>
+    <ClCompile Include="ViewportPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="WorldBuilderPanel.cpp">
+      <Filter>Editor UI</Filter>
+    </ClCompile>
+    <ClCompile Include="glad.c">
+      <Filter>Third Party</Filter>
+    </ClCompile>
+    <ClCompile Include="main.cpp">
+      <Filter>Application and Workspace</Filter>
+    </ClCompile>
+    <ClCompile Include="ufbx.c">
+      <Filter>Third Party</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="$(SolutionDir)Libraries\include\ufbx.h">
+      <Filter>Third Party</Filter>
+    </ClInclude>
+    <ClInclude Include="AsegPreview.h">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="AssetBrowserPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="AssetDatabase.h">
+      <Filter>Application and Workspace</Filter>
+    </ClInclude>
+    <ClInclude Include="AudioPreviewService.h">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="BrxCompiler.h">
+      <Filter>Document and Native Format</Filter>
+    </ClInclude>
+    <ClInclude Include="BrxDocument.h">
+      <Filter>Document and Native Format</Filter>
+    </ClInclude>
+    <ClInclude Include="BrxLoader.h">
+      <Filter>Document and Native Format</Filter>
+    </ClInclude>
+    <ClInclude Include="BrxSourceDocument.h">
+      <Filter>Document and Native Format</Filter>
+    </ClInclude>
+    <ClInclude Include="CameraRuntimePanel.h">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="CharacterExport.h">
+      <Filter>Import and Export</Filter>
+    </ClInclude>
+    <ClInclude Include="CharacterStudioPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="CreateObjectCatalogPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="DialogManagerPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="EditorApplication.h">
+      <Filter>Application and Workspace</Filter>
+    </ClInclude>
+    <ClInclude Include="EditorCamera.h">
+      <Filter>Rendering and Visibility</Filter>
+    </ClInclude>
+    <ClInclude Include="EditorDocumentOperations.h">
+      <Filter>Application and Workspace</Filter>
+    </ClInclude>
+    <ClInclude Include="EditorHistory.h">
+      <Filter>Application and Workspace</Filter>
+    </ClInclude>
+    <ClInclude Include="EditorOptions.h">
+      <Filter>Application and Workspace</Filter>
+    </ClInclude>
+    <ClInclude Include="EditorProject.h">
+      <Filter>Application and Workspace</Filter>
+    </ClInclude>
+    <ClInclude Include="EditorTheme.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="EditorTutorialsPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="EditorWorkspace.h">
+      <Filter>Application and Workspace</Filter>
+    </ClInclude>
+    <ClInclude Include="EmitterPreviewRuntime.h">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="ExitManagerPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="GuidedObjectStudiosPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="HubProgressionStudioPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="InspectorPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="MapExport.h">
+      <Filter>Import and Export</Filter>
+    </ClInclude>
+    <ClInclude Include="ModelImport.h">
+      <Filter>Import and Export</Filter>
+    </ClInclude>
+    <ClInclude Include="ObjectOperationsPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="ObjectTypeRegistry.h">
+      <Filter>Application and Workspace</Filter>
+    </ClInclude>
+    <ClInclude Include="PathZoneRuntime.h">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="PlacementTools.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="PlatformDialogs.h">
+      <Filter>Application and Workspace</Filter>
+    </ClInclude>
+    <ClInclude Include="PrefabLibrary.h">
+      <Filter>Application and Workspace</Filter>
+    </ClInclude>
+    <ClInclude Include="ProxyRuntime.h">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="RenderShaders.h">
+      <Filter>Rendering and Visibility</Filter>
+    </ClInclude>
+    <ClInclude Include="ResolvedScene.h">
+      <Filter>Application and Workspace</Filter>
+    </ClInclude>
+    <ClInclude Include="RuntimePreviewWorld.h">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="SceneHierarchyPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="SceneRenderer.h">
+      <Filter>Rendering and Visibility</Filter>
+    </ClInclude>
+    <ClInclude Include="SceneWorldPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="SmPreviewRuntime.h">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="SoundBank.h">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="SoundManagerPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="SpeakerManagerPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="SpliceEventsPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="SpliceRuntime.h">
+      <Filter>Runtime Preview and Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="SpliceTutorialPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="TextureImport.h">
+      <Filter>Import and Export</Filter>
+    </ClInclude>
+    <ClInclude Include="TextureManagerPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="TnCameraPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="ValidationPanel.h">
+      <Filter>Validation and Authoring Rules</Filter>
+    </ClInclude>
+    <ClInclude Include="ValidationReport.h">
+      <Filter>Validation and Authoring Rules</Filter>
+    </ClInclude>
+    <ClInclude Include="ValidationSystem.h">
+      <Filter>Validation and Authoring Rules</Filter>
+    </ClInclude>
+    <ClInclude Include="ViewportPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+    <ClInclude Include="VisibilityMap.h">
+      <Filter>Rendering and Visibility</Filter>
+    </ClInclude>
+    <ClInclude Include="WorldBuilderPanel.h">
+      <Filter>Editor UI</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

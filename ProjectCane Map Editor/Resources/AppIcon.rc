@@ -1,0 +1,3 @@
+#include "AppIcon.h"
+// Lowest resource ID is the default icon displayed for the Windows executable.
+IDI_PROJECTCANE ICON "ProjectCane.ico"
