@@ -3,10 +3,159 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cctype>
 #include <cstring>
 #include <iterator>
 #include <limits>
 #include <unordered_map>
+
+namespace
+{
+std::string PropertyIdentifier(const std::string &text)
+{
+    std::string result;
+    for (const auto ch : text)
+        if (std::isalnum(static_cast<unsigned char>(ch)))
+            result.push_back(ch);
+    return result;
+}
+
+std::string PropertyLookupKey(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(),
+                   [](const unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return text;
+}
+
+std::string PropertySourceIdentifier(const std::int16_t cid, const std::int16_t id)
+{
+    const auto *name = PropertyNameForCid(cid, id);
+    return name && name[0] != '\0' ? PropertyIdentifier(name) : "NativeOperation" + std::to_string(id);
+}
+}
+
+std::string SplicePropertyToken(const std::int16_t cid, const std::int16_t eopid)
+{
+    static const auto tokens = []
+    {
+        std::array<std::unordered_map<std::int16_t, std::string>, 148> result;
+        for (std::size_t classIndex = 0; classIndex < result.size(); ++classIndex)
+        {
+            const auto classId = static_cast<std::int16_t>(classIndex);
+            std::unordered_map<std::string, std::size_t> counts;
+            for (const auto id : CidOptionIds()[classIndex])
+                ++counts[PropertyLookupKey(PropertySourceIdentifier(classId, id))];
+            for (const auto id : CidOptionIds()[classIndex])
+            {
+                const auto name = PropertySourceIdentifier(classId, id);
+                // Disambiguate duplicate names within one CID without changing
+                // any native option ID or descriptor data.
+                result[classIndex].emplace(id, std::string(BrxDocument::ClassName(classId)) + "." + name +
+                    (counts[PropertyLookupKey(name)] > 1 ? "#" + std::to_string(id) : ""));
+            }
+        }
+        return result;
+    }();
+    if (cid < 0 || static_cast<std::size_t>(cid) >= tokens.size())
+        return {};
+    const auto found = tokens[static_cast<std::size_t>(cid)].find(eopid);
+    return found == tokens[static_cast<std::size_t>(cid)].end() ? std::string{} : found->second;
+}
+
+std::int16_t SplicePropertyDescriptor(const std::string &token)
+{
+    static const auto names = []
+    {
+        std::unordered_map<std::string, std::int16_t> result;
+        for (std::size_t cid = 0; cid < CidOptionIds().size(); ++cid)
+            for (const auto id : CidOptionIds()[cid])
+            {
+                result.emplace(PropertyLookupKey(SplicePropertyToken(static_cast<std::int16_t>(cid), id)), id);
+                const auto key = PropertyLookupKey(PropertySourceIdentifier(static_cast<std::int16_t>(cid), id));
+                const auto [entry, inserted] = result.emplace(key, id);
+                if (!inserted && entry->second != id)
+                    entry->second = -2;
+            }
+        return result;
+    }();
+    // Preserve dots and disambiguating suffixes in qualified tokens.
+    const auto dot = token.find('.');
+    const auto suffix = token.find('#', dot == std::string::npos ? 0 : dot);
+    const auto key = PropertyLookupKey(dot == std::string::npos ? PropertyIdentifier(token) :
+        token.substr(0, dot + 1) + PropertyIdentifier(token.substr(dot + 1, suffix == std::string::npos
+            ? std::string::npos : suffix - dot - 1)) + (suffix == std::string::npos ? "" : token.substr(suffix)));
+    const auto found = names.find(key);
+    return found == names.end() ? -1 : found->second;
+}
+
+std::int32_t SplicePropertyOptionId(const std::int16_t descriptor)
+{
+    static constexpr std::int32_t optionIds[]{
+#include "SplicePropertyOptionIds.generated.inc"
+    };
+    static_assert(std::size(optionIds) == 1179);
+    return descriptor >= 0 && static_cast<std::size_t>(descriptor) < std::size(optionIds)
+               ? optionIds[descriptor] : -1;
+}
+
+std::int16_t ResolveSplicePropertyToken(const std::string &token)
+{
+    const auto descriptor = SplicePropertyDescriptor(token);
+    return descriptor < 0 ? descriptor : static_cast<std::int16_t>(SplicePropertyOptionId(descriptor));
+}
+
+std::int16_t SplicePropertyDescriptorForOptionId(const std::int16_t cid, const std::int32_t optionId)
+{
+    std::int16_t match = -1;
+    const auto consider = [&](const std::int16_t id)
+    {
+        if (SplicePropertyOptionId(id) == optionId)
+            match = match == -1 || match == id ? id : -2;
+    };
+    if (cid >= 0 && static_cast<std::size_t>(cid) < CidOptionIds().size())
+        for (const auto id : CidOptionIds()[static_cast<std::size_t>(cid)])
+            consider(id);
+    else
+        for (std::int16_t id = 0; id < 1179; ++id)
+            consider(id);
+    return match;
+}
+
+std::string SplicePropertyBinding(const std::int16_t eopid)
+{
+    switch (eopid)
+    {
+#define BRX_SPLICE_BINDING(id, flags, binding, description) case id: return binding;
+#include "SplicePropertyBindings.generated.inc"
+#undef BRX_SPLICE_BINDING
+    default:
+        return "No native binding recorded.";
+    }
+}
+
+std::string SplicePropertyDetails(const std::int16_t eopid)
+{
+    switch (eopid)
+    {
+#define BRX_SPLICE_BINDING(id, flags, binding, description) case id: return description;
+#include "SplicePropertyBindings.generated.inc"
+#undef BRX_SPLICE_BINDING
+    default:
+        return "No native descriptor exists at this index.";
+    }
+}
+
+std::uint32_t SplicePropertyRuntimeFlags(const std::int16_t eopid)
+{
+    switch (eopid)
+    {
+#define BRX_SPLICE_BINDING(id, flags, binding, description) case id: return flags;
+#include "SplicePropertyBindings.generated.inc"
+#undef BRX_SPLICE_BINDING
+    default:
+        return 0;
+    }
+}
 
 const char *PropertyName(const std::int16_t eopid)
 {
@@ -2202,6 +2351,22 @@ const char *PropertyName(const std::int16_t eopid)
         return "Apply death throw (runtime action)";
     case 1172:
         return "Security code count";
+    case 1132:
+        return "Start thunder flash";
+    case 1133:
+        return "Flash start color";
+    case 1134:
+        return "Flash peak color";
+    case 1135:
+        return "Flash end color";
+    case 1136:
+        return "Flash fade-in time";
+    case 1137:
+        return "Flash fade-out time";
+    case 1138:
+        return "Flash hold time";
+    case 1139:
+        return "Flash kind";
     case 1173:
         return "Lives";
     case 1174:

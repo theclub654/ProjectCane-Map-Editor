@@ -20,6 +20,12 @@
 
 namespace
 {
+const char *SpliceOperationName(const std::int16_t cid, const std::int16_t descriptor)
+{
+    const auto *name = PropertyNameForCid(cid, descriptor);
+    return name && name[0] != '\0' ? name : "Unnamed native operation";
+}
+
 struct SpliceSourceEditorState
 {
     int requestedCursor = -1;
@@ -266,8 +272,12 @@ std::string FriendlySpliceNodeDetail(const BrxDocument &document, const std::int
             const auto option = document.SpliceNodes()[static_cast<std::size_t>(self)].nextNode;
             if (option >= 0 && static_cast<std::size_t>(option) < document.SpliceNodes().size())
             {
+                if (document.SpliceNodes()[static_cast<std::size_t>(option)].tag != 20)
+                    return "Set computed native option";
                 const auto eopid = document.SpliceNodes()[static_cast<std::size_t>(option)].intValue;
-                return std::string("Set ") + PropertyName(static_cast<std::int16_t>(eopid));
+                const auto descriptor = SplicePropertyDescriptorForOptionId(-1, eopid);
+                return descriptor >= 0 ? std::string("Set ") + SpliceOperationName(-1, descriptor)
+                                       : "Set native option " + std::to_string(eopid) + " (target-dependent)";
             }
         }
     }
@@ -1027,10 +1037,10 @@ void DrawSpliceEventsPanel(bool &open, BrxDocument &document, EditorWorkspace &w
                         {
                             ImGui::SetNextItemWidth(360.0f);
                             if (ImGui::BeginCombo("Target property",
-                                                  PropertyNameForCid(target.cid, designerTargetProperty)))
+                                                  SpliceOperationName(target.cid, designerTargetProperty)))
                             {
                                 for (const auto eopid : targetOptions)
-                                    if (ImGui::Selectable((std::string(PropertyNameForCid(target.cid, eopid)) +
+                                    if (ImGui::Selectable((std::string(SpliceOperationName(target.cid, eopid)) +
                                                            "##targetProperty" + std::to_string(eopid))
                                                               .c_str(),
                                                           designerTargetProperty == eopid))
@@ -1038,16 +1048,22 @@ void DrawSpliceEventsPanel(bool &open, BrxDocument &document, EditorWorkspace &w
                                 ImGui::EndCombo();
                             }
                         }
-                        const std::string findSnippet = target.editorName.empty()
-                                                            ? "(find-object " + std::to_string(target.oid) + " tag#0:0)"
-                                                            : "@" + target.editorName;
-                        if (ImGui::Button(target.editorName.empty() ? "Copy Find Object source"
-                                                                    : "Copy @Name reference"))
+                        // Numeric lookup also works for duplicate editor names
+                        // and names requiring brace escaping.
+                        const bool simpleAlias = !target.editorName.empty() &&
+                            document.FindObjectByEditorName(target.editorName) == designerTargetObject &&
+                            std::all_of(target.editorName.begin(), target.editorName.end(), [](const unsigned char ch)
+                            { return std::isalnum(ch) || ch == '_' || ch == '-'; });
+                        const std::string findSnippet = simpleAlias ? "@" + target.editorName
+                            : "(find-object " + std::to_string(target.oid) + " tag#0:0)";
+                        if (ImGui::Button(simpleAlias ? "Copy @Name reference" : "Copy Find Object source"))
                             ImGui::SetClipboardText(findSnippet.c_str());
                         ImGui::SameLine();
                         const std::string getSnippet =
-                            "(geto " + findSnippet + " " + std::to_string(designerTargetProperty) + ")";
-                        ImGui::BeginDisabled(targetOptions.empty());
+                            "(geto " + findSnippet + " " + SplicePropertyToken(target.cid, designerTargetProperty) + ")";
+                        const auto targetFlags = SplicePropertyRuntimeFlags(designerTargetProperty);
+                        ImGui::BeginDisabled(targetOptions.empty() || (targetFlags & 0xFu) == 0 ||
+                                             SplicePropertyOptionId(designerTargetProperty) >= 1173);
                         if (ImGui::Button("Copy Get Property source"))
                             ImGui::SetClipboardText(getSnippet.c_str());
                         ImGui::EndDisabled();
@@ -1083,11 +1099,17 @@ void DrawSpliceEventsPanel(bool &open, BrxDocument &document, EditorWorkspace &w
                     for (const auto builtin : analysis.builtinCalls)
                         ImGui::BulletText("Call %s", SpliceBuiltinName(builtin));
                     for (const auto option : analysis.optionReads)
-                        ImGui::BulletText("Read property %s (%d)",
-                                          PropertyNameForCid(selected.cid, static_cast<std::int16_t>(option)), option);
+                    {
+                        const auto descriptor = SplicePropertyDescriptorForOptionId(-1, option);
+                        ImGui::BulletText("Read %s (native option %d)",
+                            descriptor >= 0 ? SpliceOperationName(-1, descriptor) : "target-dependent operation", option);
+                    }
                     for (const auto option : analysis.optionWrites)
-                        ImGui::BulletText("Set property %s (%d)",
-                                          PropertyNameForCid(selected.cid, static_cast<std::int16_t>(option)), option);
+                    {
+                        const auto descriptor = SplicePropertyDescriptorForOptionId(-1, option);
+                        ImGui::BulletText("Set %s (native option %d)",
+                            descriptor >= 0 ? SpliceOperationName(-1, descriptor) : "target-dependent operation", option);
+                    }
 
                     std::unordered_set<std::int32_t> designerSymbols;
                     std::unordered_set<std::int32_t> designerFormalSymbols;
@@ -1324,13 +1346,15 @@ void DrawSpliceEventsPanel(bool &open, BrxDocument &document, EditorWorkspace &w
                         for (const auto eopid : optionIds)
                         {
                             const auto definition = EditorOptionDefinitionForCid(selected.cid, eopid);
+                            const auto flags = SplicePropertyRuntimeFlags(eopid);
                             const auto kind = definition.kind;
                             if (kind == BrxPropertyKind::Bool || kind == BrxPropertyKind::Float ||
                                 kind == BrxPropertyKind::Int16 || kind == BrxPropertyKind::TypedInt16 ||
                                 kind == BrxPropertyKind::Int32 || kind == BrxPropertyKind::UInt32)
                             {
                                 if (!definition.present || OptionGroup(eopid) == EditorOptionGroup::Identity ||
-                                    OptionBehavior(eopid) == EditorOptionBehavior::Query)
+                                    (flags & 0x70u) == 0 || (flags & 1u) != 0 ||
+                                    SplicePropertyOptionId(eopid) >= 1173)
                                     continue;
                                 scalarOptionIds.push_back(eopid);
                             }
@@ -1443,7 +1467,7 @@ void DrawSpliceEventsPanel(bool &open, BrxDocument &document, EditorWorkspace &w
                         "Edit a temporary source buffer, validate it, then apply it to the same expression tree used by the graph. "
                         "Invalid source never changes the live module.");
                     ImGui::TextDisabled(
-                        "Property names are CID-aware and ignore spaces/punctuation: Frozen, AnimationPlaybackRate, or a numeric EOPID.");
+                        "Use qualified property names from Help, such as ALO.Hidden or ALO.Frozen. Raw native option IDs remain supported.");
                     ImGui::TextDisabled(
                         "Editor-only object aliases use @Name and compile to the current world's native (find-object OID null-basis) expression.");
                     if (sourceModule != moduleIndex)
@@ -1565,7 +1589,10 @@ void DrawSpliceEventsPanel(bool &open, BrxDocument &document, EditorWorkspace &w
                         std::vector<std::string> completions;
                         const auto addCompletion = [&](const std::string &candidate)
                         {
-                            if (candidate.starts_with(completionPrefix) && candidate != completionPrefix &&
+                            const auto dot = candidate.find('.');
+                            const bool matches = candidate.starts_with(completionPrefix) ||
+                                (dot != std::string::npos && candidate.substr(dot + 1).starts_with(completionPrefix));
+                            if (matches && candidate != completionPrefix &&
                                 std::find(completions.begin(), completions.end(), candidate) == completions.end() &&
                                 completions.size() < 8)
                                 completions.push_back(candidate);
@@ -1587,13 +1614,17 @@ void DrawSpliceEventsPanel(bool &open, BrxDocument &document, EditorWorkspace &w
                         if (selected.cid >= 0 && static_cast<std::size_t>(selected.cid) < CidOptionIds().size())
                             for (const auto eopid : CidOptionIds()[static_cast<std::size_t>(selected.cid)])
                             {
-                                std::string name = PropertyNameForCid(selected.cid, eopid);
-                                name.erase(std::remove_if(
-                                               name.begin(), name.end(), [](const char ch)
-                                               { return !std::isalnum(static_cast<unsigned char>(ch)) && ch != '_'; }),
-                                           name.end());
-                                addCompletion(name);
+                                addCompletion(SplicePropertyToken(selected.cid, eopid));
                             }
+                        for (std::size_t cid = 0; cid < CidOptionIds().size(); ++cid)
+                        {
+                            const auto prefix = std::string(BrxDocument::ClassName(static_cast<std::int16_t>(cid))) + ".";
+                            if (completionPrefix.find('.') == std::string::npos)
+                                addCompletion(prefix);
+                            if (completionPrefix.starts_with(prefix))
+                                for (const auto eopid : CidOptionIds()[cid])
+                                    addCompletion(SplicePropertyToken(static_cast<std::int16_t>(cid), eopid));
+                        }
                         if (completionPrefix.front() == '$')
                         {
                             addCompletion("$self");

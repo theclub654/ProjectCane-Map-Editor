@@ -69,6 +69,16 @@ struct EditorOptionIssue
 
 [[nodiscard]] const char *PropertyName(std::int16_t eopid);
 [[nodiscard]] const char *PropertyNameForCid(std::int16_t cid, std::int16_t eopid);
+// Qualified source tokens are independent of the object owning the script.
+[[nodiscard]] std::string SplicePropertyToken(std::int16_t cid, std::int16_t eopid);
+// Returns -1 for an unknown name and -2 for an ambiguous unqualified name.
+[[nodiscard]] std::int16_t ResolveSplicePropertyToken(const std::string &token);
+[[nodiscard]] std::int16_t SplicePropertyDescriptor(const std::string &token);
+[[nodiscard]] std::int32_t SplicePropertyOptionId(std::int16_t descriptor);
+[[nodiscard]] std::int16_t SplicePropertyDescriptorForOptionId(std::int16_t cid, std::int32_t optionId);
+[[nodiscard]] std::string SplicePropertyBinding(std::int16_t eopid);
+[[nodiscard]] std::string SplicePropertyDetails(std::int16_t eopid);
+[[nodiscard]] std::uint32_t SplicePropertyRuntimeFlags(std::int16_t eopid);
 [[nodiscard]] const char *PropertyKindName(BrxPropertyKind kind);
 [[nodiscard]] const std::array<EditorOptionDefinition, 1179> &EditorOptionDefinitions();
 [[nodiscard]] EditorOptionDefinition EditorOptionDefinitionForCid(std::int16_t cid, std::int16_t eopid);

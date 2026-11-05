@@ -13,6 +13,12 @@
 
 namespace
 {
+const char *OperationName(const std::int16_t cid, const std::int16_t eopid)
+{
+    const auto *name = PropertyNameForCid(cid, eopid);
+    return name && name[0] != '\0' ? name : "Unnamed native operation";
+}
+
 bool IsScalar(const BrxPropertyKind kind)
 {
     return kind == BrxPropertyKind::Bool || kind == BrxPropertyKind::Float || kind == BrxPropertyKind::Int16 ||
@@ -58,29 +64,35 @@ std::string ValueLiteral(const BrxPropertyKind kind)
     }
 }
 
-std::string ExampleFor(const std::int16_t eopid, const EditorOptionDefinition &definition,
-                       const EditorOptionBehavior behavior)
+std::string ExampleFor(const std::int16_t cid, const std::int16_t eopid, const EditorOptionDefinition &definition)
 {
-    if (eopid == 347)
+    const auto token = SplicePropertyToken(cid, eopid);
+    const auto flags = SplicePropertyRuntimeFlags(eopid);
+    if (token.empty() || SplicePropertyOptionId(eopid) >= 1173)
         return {};
-    if (behavior == EditorOptionBehavior::Query || behavior == EditorOptionBehavior::Derived)
-        return "(geto @Target " + std::to_string(eopid) + ")";
-    if (behavior == EditorOptionBehavior::Action)
+    if ((flags & 1u) != 0)
     {
-        if (definition.argumentCount != 0)
-            return {};
-        return "(seto! @Target " + std::to_string(eopid) + " 0)";
+        std::string call = "((geto @Target " + token + ")";
+        for (std::uint16_t argument = 0; argument < definition.argumentCount; ++argument)
+            call += " $argument" + std::to_string(argument + 1);
+        return call + ")";
     }
+    if ((flags & 0x70u) == 0)
+        return (flags & 0xEu) != 0 ? "(geto @Target " + token + ")" : std::string{};
     const auto literal = ValueLiteral(definition.kind);
     if (literal.empty())
-        return {};
-    return "(seto! @Target " + std::to_string(eopid) + " " + literal + ")";
+        return "(seto! @Target " + token + " $typedValue)";
+    return "(seto! @Target " + token + " " + literal + ")";
 }
 
 const char *VerifiedNote(const std::int16_t eopid)
 {
     switch (eopid)
     {
+    case 28:
+        return "Reads the object's frozen-state Boolean through GetAloFrozen. This descriptor has no Splice setter: use geto, not seto!. Reading it does not freeze or thaw the object.";
+    case 125:
+        return "Controls the ALO hidden flag through SetAloHidden/GetAloHidden. Set true to hide the object or false to show it. This changes the hidden flag; it does not delete the object or remove its script.";
     case 162:
         return "WARP action: TriggerWarp teleports the player and dispatches the WARP Trigger event.";
     case 347:
@@ -90,22 +102,26 @@ const char *VerifiedNote(const std::int16_t eopid)
     }
 }
 
-std::string DescriptionFor(const std::int16_t cid, const std::int16_t eopid, const EditorOptionDefinition &definition,
-                           const EditorOptionBehavior behavior)
+std::string DescriptionFor(const std::int16_t cid, const std::int16_t eopid, const EditorOptionDefinition &definition)
 {
     if (const auto *note = VerifiedNote(eopid))
         return note;
-    std::string description = std::string(PropertyNameForCid(cid, eopid)) + " is a " + OptionBehaviorName(behavior) +
-                              " in " + OptionGroupName(OptionGroup(eopid)) + ".";
-    if (behavior == EditorOptionBehavior::Stored)
-        description += " It can be authored as a BRX override when the CID exposes a SetUser lane.";
-    else if (behavior == EditorOptionBehavior::Query || behavior == EditorOptionBehavior::Derived)
-        description +=
-            " Treat it as read-only; it is produced by runtime state rather than serialized as an editable constant.";
-    else if (behavior == EditorOptionBehavior::Action)
-        description += " Calling it invokes native gameplay behavior; sandbox preview may only log the side effect.";
-    if (definition.argumentCount != 0)
-        description += " Descriptor argument count: " + std::to_string(definition.argumentCount) + ".";
+    const auto flags = SplicePropertyRuntimeFlags(eopid);
+    std::string description = std::string(OperationName(cid, eopid)) + " belongs to " +
+                              OptionGroupName(OptionGroup(eopid)) + " and has native value type " +
+                              PropertyKindName(definition.kind) + ". ";
+    if (SplicePropertyOptionId(eopid) >= 1173)
+        description += "Its lookup ID reaches the native sidebag boundary. geto/seto! use a custom sidebag binding at this ID, not this descriptor's field or method.";
+    else if ((flags & 1u) != 0)
+        description += "geto returns a native method. Call it with " + std::to_string(definition.argumentCount) +
+                       " argument(s) using the outer call shown below. A method may query state or perform a gameplay action; it is not a property setter.";
+    else
+    {
+        description += (flags & 0xEu) != 0 ? "geto reads its current native value. " : "No native Splice getter is exposed. ";
+        description += (flags & 0x70u) != 0 ? "seto! changes it using a value of the stated type. " : "No native Splice setter is exposed. ";
+    }
+    description += " " + SplicePropertyDetails(eopid);
+    description += " Descriptor access does not imply a sandbox simulation of its gameplay effects.";
     return description;
 }
 }
@@ -172,7 +188,8 @@ void DrawObjectOperationsPanel(bool &open)
                 continue;
             if (writableOnly && !IsEditorWritableOptionForCid(cid, eopid))
                 continue;
-            const std::string haystack = std::string(PropertyNameForCid(cid, eopid)) + " " + std::to_string(eopid) +
+            const std::string haystack = std::string(OperationName(cid, eopid)) + " " + std::to_string(eopid) +
+                                         " " + SplicePropertyToken(cid, eopid) + " " + std::to_string(SplicePropertyOptionId(eopid)) +
                                          " " + OptionGroupName(OptionGroup(eopid)) + " " +
                                          PropertyKindName(definition.kind) + " " + OptionBehaviorName(behavior);
             if (!search.PassFilter(haystack.c_str()))
@@ -201,7 +218,7 @@ void DrawObjectOperationsPanel(bool &open)
             const auto behavior = OptionBehavior(eopid);
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            const std::string selectable = std::string(PropertyNameForCid(cid, eopid)) + "##op" + std::to_string(eopid);
+            const std::string selectable = std::string(OperationName(cid, eopid)) + "##op" + std::to_string(eopid);
             if (ImGui::Selectable(selectable.c_str(), selectedEopid == eopid, ImGuiSelectableFlags_SpanAllColumns))
                 selectedEopid = eopid;
             ImGui::TableSetColumnIndex(1);
@@ -225,16 +242,23 @@ void DrawObjectOperationsPanel(bool &open)
         const auto eopid = static_cast<std::int16_t>(selectedEopid);
         const auto definition = EditorOptionDefinitionForCid(cid, eopid);
         const auto behavior = OptionBehavior(eopid);
-        ImGui::SeparatorText(PropertyNameForCid(cid, eopid));
-        ImGui::TextWrapped("%s", DescriptionFor(cid, eopid, definition, behavior).c_str());
+        ImGui::SeparatorText(OperationName(cid, eopid));
+        ImGui::TextWrapped("%s", DescriptionFor(cid, eopid, definition).c_str());
         ImGui::Text("EOPID %d | %s | %s | %s", eopid, PropertyKindName(definition.kind), OptionBehaviorName(behavior),
                     OptionGroupName(OptionGroup(eopid)));
+        const auto token = SplicePropertyToken(cid, eopid);
+        ImGui::Text("Source token: %s | Native script option ID: %d", token.c_str(), SplicePropertyOptionId(eopid));
+        if (ImGui::Button("Copy property name"))
+            ImGui::SetClipboardText(token.c_str());
+        ImGui::TextWrapped("The EOPID above is the descriptor index. Native scripts use the option ID, which can differ. Qualified source names resolve to the option ID. @Target must be an object exposing this operation; replace $argumentN/$typedValue placeholders with correctly typed arguments.");
+        if (ImGui::CollapsingHeader("Advanced native binding"))
+            ImGui::TextWrapped("BuildEopids, spaprops.cpp: %s", SplicePropertyBinding(eopid).c_str());
         ImGui::Text("BRX authoring: %s | Runtime default: %s",
                     IsEditorWritableOptionForCid(cid, eopid) ? "writable" : "not a stored editor override",
                     DefaultText(definition).c_str());
         if (IsObjectReferenceOption(eopid))
             ImGui::Text("Object reference contract: %s", ObjectReferenceTypeName(eopid));
-        const auto example = ExampleFor(eopid, definition, behavior);
+        const auto example = ExampleFor(cid, eopid, definition);
         if (!example.empty())
         {
             ImGui::Text("Splice example: %s", example.c_str());

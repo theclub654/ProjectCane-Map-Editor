@@ -1631,7 +1631,53 @@ std::string FormatSpliceModuleSource(const BrxDocument &document, const std::int
             {
                 if (!first)
                     result += "\n" + std::string(static_cast<std::size_t>((depth + 1) * 2), ' ');
-                result += formatExpression(item, depth + 1);
+                // Only the EOPID operand is a property name. Numeric values,
+                // OIDs, symbol IDs and all other integer data stay unchanged.
+                std::string propertyToken;
+                const auto &head = document.SpliceNodes()[static_cast<std::size_t>(node.childNode)];
+                const auto &operand = document.SpliceNodes()[static_cast<std::size_t>(item)];
+                if (itemCount == 2 && head.tag == kBifk && head.intValue >= 99 && head.intValue <= 102 &&
+                    operand.tag == kS32 && operand.intValue >= 0 && operand.intValue < 1173)
+                {
+                    std::int16_t targetCid = -1;
+                    const auto targetIndex = head.nextNode;
+                    if (ValidNode(document, targetIndex))
+                    {
+                        const auto &target = document.SpliceNodes()[static_cast<std::size_t>(targetIndex)];
+                        if (target.tag == kPair && ValidNode(document, target.childNode))
+                        {
+                            const auto &find = document.SpliceNodes()[static_cast<std::size_t>(target.childNode)];
+                            if (find.tag == kBifk && find.intValue == 103 && ValidNode(document, find.nextNode))
+                            {
+                                const auto &oid = document.SpliceNodes()[static_cast<std::size_t>(find.nextNode)];
+                                if (oid.tag == kS32)
+                                    for (const auto &object : document.Objects())
+                                        if (object.oid == oid.intValue)
+                                        {
+                                            if (targetCid >= 0 && targetCid != object.cid)
+                                            {
+                                                targetCid = -1;
+                                                break;
+                                            }
+                                            targetCid = object.cid;
+                                        }
+                            }
+                        }
+                    }
+                    // Computed targets only get a name if the lookup has the
+                    // same meaning across every native class table.
+                    const auto descriptor = SplicePropertyDescriptorForOptionId(targetCid, operand.intValue);
+                    if (descriptor >= 0 &&
+                        (head.intValue != 101 || (SplicePropertyRuntimeFlags(descriptor) & 0x70u) != 0))
+                    {
+                        if (targetCid >= 0)
+                            propertyToken = SplicePropertyToken(targetCid, descriptor);
+                        else
+                            for (std::size_t cid = 0; cid < CidOptionIds().size() && propertyToken.empty(); ++cid)
+                                propertyToken = SplicePropertyToken(static_cast<std::int16_t>(cid), descriptor);
+                    }
+                }
+                result += propertyToken.empty() ? formatExpression(item, depth + 1) : propertyToken;
                 first = false;
                 ++itemCount;
                 item = document.SpliceNodes()[static_cast<std::size_t>(item)].nextNode;
@@ -1660,7 +1706,8 @@ struct ParsedSpliceSource
     SpliceSourceResult result;
     std::vector<BrxSpliceNode> nodes;
     std::int32_t root = -1;
-    std::unordered_set<std::int32_t> cidResolvedPropertyNodes;
+    std::unordered_map<std::int32_t, std::int16_t> cidResolvedPropertyNodes;
+    std::unordered_map<std::int32_t, std::int16_t> aliasTargetCids;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> nodeLocations;
 };
 
@@ -2036,6 +2083,7 @@ class SpliceSourceParser
             output_->nodes[static_cast<std::size_t>(oid)].intValue =
                 editorAliases_->Objects()[static_cast<std::size_t>(objectIndex)].oid;
             output_->nodes[static_cast<std::size_t>(oid)].nextNode = basis;
+            output_->aliasTargetCids.emplace(pair, editorAliases_->Objects()[static_cast<std::size_t>(objectIndex)].cid);
             return pair;
         }
         if (token.text.starts_with("tag#"))
@@ -2120,44 +2168,35 @@ class SpliceSourceParser
                 }
                 return node;
             }
-        if (selectedCid_ >= 0 && static_cast<std::size_t>(selectedCid_) < CidOptionIds().size())
+        // Resolve qualified names independently of the script owner's CID:
+        // @Target may refer to a completely different object class.
+        auto propertyMatch = !token.text.empty() && token.text.front() != '$'
+                                 ? SplicePropertyDescriptor(token.text) : -1;
+        if (propertyMatch == -2 && token.text.find('.') == std::string::npos && selectedCid_ >= 0 &&
+            static_cast<std::size_t>(selectedCid_) < CidOptionIds().size())
         {
-            const auto normalize = [](const std::string_view text)
+            // Retain the original selected-CID shorthand for existing scripts.
+            std::int16_t localMatch = -1;
+            for (const auto id : CidOptionIds()[static_cast<std::size_t>(selectedCid_)])
+                if (SplicePropertyDescriptor(std::string(BrxDocument::ClassName(selectedCid_)) + "." + token.text) == id)
+                    localMatch = id;
+            if (localMatch >= 0)
+                propertyMatch = localMatch;
+        }
+        if (propertyMatch == -2)
+        {
+            Error(token, "Property name '" + token.text + "' is ambiguous; copy its qualified name from Help > Object Operations Reference.");
+            return -1;
+        }
+        if (propertyMatch >= 0)
+        {
+            const auto node = AddNode(kS32);
+            if (node >= 0)
             {
-                std::string result;
-                for (const auto ch : text)
-                    if (std::isalnum(static_cast<unsigned char>(ch)))
-                        result.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
-                return result;
-            };
-            const auto requested = normalize(token.text);
-            std::int16_t match = -1;
-            bool ambiguous = false;
-            for (const auto eopid : CidOptionIds()[static_cast<std::size_t>(selectedCid_)])
-            {
-                const auto *propertyName = PropertyNameForCid(selectedCid_, eopid);
-                if (propertyName && normalize(propertyName) == requested)
-                {
-                    if (match >= 0 && match != eopid)
-                        ambiguous = true;
-                    match = eopid;
-                }
+                output_->nodes[static_cast<std::size_t>(node)].intValue = SplicePropertyOptionId(propertyMatch);
+                output_->cidResolvedPropertyNodes.emplace(node, propertyMatch);
             }
-            if (ambiguous)
-            {
-                Error(token, "Property name '" + token.text + "' is ambiguous for this CID; use its numeric EOPID.");
-                return -1;
-            }
-            if (match >= 0)
-            {
-                const auto node = AddNode(kS32);
-                if (node >= 0)
-                {
-                    output_->nodes[static_cast<std::size_t>(node)].intValue = match;
-                    output_->cidResolvedPropertyNodes.insert(node);
-                }
-                return node;
-            }
+            return node;
         }
         if (token.text.size() > 1 && token.text.front() == '$')
         {
@@ -2204,7 +2243,7 @@ class SpliceSourceParser
     ParsedSpliceSource *output_ = nullptr;
 };
 
-void ValidateParsedSpliceSemantics(ParsedSpliceSource &parsed, const std::int16_t selectedCid)
+void ValidateParsedSpliceSemantics(ParsedSpliceSource &parsed)
 {
     if (parsed.root < 0 || static_cast<std::size_t>(parsed.root) >= parsed.nodes.size())
         return;
@@ -2379,15 +2418,27 @@ void ValidateParsedSpliceSemantics(ParsedSpliceSource &parsed, const std::int16_
         // OIDs/EOPIDs/values, not evidence of a literal type mismatch.
         if (head.tag == kBifk && (head.intValue == 101 || head.intValue == 102) && items.size() >= 3 &&
             parsed.nodes[static_cast<std::size_t>(items[2])].tag == kS32 &&
-            parsed.cidResolvedPropertyNodes.contains(items[2]) && selectedCid >= 0 &&
-            static_cast<std::size_t>(selectedCid) < CidOptionIds().size())
+            parsed.cidResolvedPropertyNodes.contains(items[2]))
         {
-            const auto eopid = static_cast<std::int16_t>(parsed.nodes[static_cast<std::size_t>(items[2])].intValue);
-            const auto &legal = CidOptionIds()[static_cast<std::size_t>(selectedCid)];
-            if (std::find(legal.begin(), legal.end(), eopid) == legal.end())
+            const auto eopid = parsed.cidResolvedPropertyNodes.at(items[2]);
+            const auto flags = SplicePropertyRuntimeFlags(eopid);
+            if (const auto target = parsed.aliasTargetCids.find(items[1]); target != parsed.aliasTargetCids.end())
+            {
+                const auto targetCid = target->second;
+                if (targetCid >= 0 && static_cast<std::size_t>(targetCid) < CidOptionIds().size())
+                {
+                    const auto &legal = CidOptionIds()[static_cast<std::size_t>(targetCid)];
+                    if (std::find(legal.begin(), legal.end(), eopid) == legal.end())
+                        parsed.result.diagnostics.push_back({location.first, location.second,
+                            "The named operation is not exposed by the @target object's class. Choose its operation from Help."});
+                }
+            }
+            if (head.intValue == 101 && (flags & 0x70u) == 0 && SplicePropertyOptionId(eopid) < 1173)
                 parsed.result.diagnostics.push_back(
                     {location.first, location.second,
-                     "EOPID " + std::to_string(eopid) + " is not legal for the selected object's CID."});
+                     (flags & 1u) != 0
+                         ? "This name is a native method. Call ((geto target PropertyName) arguments...), not seto!."
+                         : "This named property has no native Splice setter. BRX authoring access does not imply runtime write access."});
         }
     }
     parsed.result.succeeded = parsed.root >= 0 && parsed.result.diagnostics.empty();
@@ -2398,7 +2449,7 @@ SpliceSourceResult ValidateSpliceModuleSource(const std::string &source, const s
                                               const std::uint32_t symbolBase, const BrxDocument *editorAliases)
 {
     auto parsed = SpliceSourceParser(source, selectedCid, symbolBase, editorAliases).Parse();
-    ValidateParsedSpliceSemantics(parsed, selectedCid);
+    ValidateParsedSpliceSemantics(parsed);
     return parsed.result;
 }
 
@@ -2406,7 +2457,7 @@ SpliceSourceResult ApplySpliceModuleSource(BrxDocument &document, const std::int
                                            const std::string &source, const std::int16_t selectedCid)
 {
     auto parsed = SpliceSourceParser(source, selectedCid, document.WorldHeader().symbolCount, &document).Parse();
-    ValidateParsedSpliceSemantics(parsed, selectedCid);
+    ValidateParsedSpliceSemantics(parsed);
     if (!parsed.result.succeeded)
         return parsed.result;
     if (spliceIndex < 0 || static_cast<std::size_t>(spliceIndex) >= document.SpliceModules().size())
@@ -2492,7 +2543,7 @@ SpliceSourceResult VerifySpliceModuleSourceRoundTrip(const BrxDocument &document
     }
     auto parsed =
         SpliceSourceParser(FormatSpliceModuleSource(document, spliceIndex), selectedCid, 0, &document).Parse();
-    ValidateParsedSpliceSemantics(parsed, selectedCid);
+    ValidateParsedSpliceSemantics(parsed);
     if (!parsed.result.succeeded)
         return parsed.result;
     std::unordered_set<std::uint64_t> visited;
@@ -3586,6 +3637,12 @@ static SpliceAuthoringResult PrependSpliceSetSelfLiteral(BrxDocument &document, 
         return result;
     }
     const auto definition = EditorOptionDefinitionForCid(object.cid, eopid);
+    const auto flags = SplicePropertyRuntimeFlags(eopid);
+    if ((flags & 0x70u) == 0 || (flags & 1u) != 0 || SplicePropertyOptionId(eopid) >= 1173)
+    {
+        result.message = "This operation has no scalar native Splice setter. Read it with geto or call its native method instead.";
+        return result;
+    }
     const bool integerProperty =
         definition.kind == BrxPropertyKind::Int16 || definition.kind == BrxPropertyKind::TypedInt16 ||
         definition.kind == BrxPropertyKind::Int32 || definition.kind == BrxPropertyKind::UInt32;
@@ -3642,7 +3699,7 @@ static SpliceAuthoringResult PrependSpliceSetSelfLiteral(BrxDocument &document, 
         nodes[static_cast<std::size_t>(seto)].nextNode = self;
         nodes[static_cast<std::size_t>(self)].intValue = selfSymbolId;
         nodes[static_cast<std::size_t>(self)].nextNode = option;
-        nodes[static_cast<std::size_t>(option)].intValue = eopid;
+        nodes[static_cast<std::size_t>(option)].intValue = SplicePropertyOptionId(eopid);
         nodes[static_cast<std::size_t>(option)].nextNode = literal;
         if (literalTag == kF32)
             nodes[static_cast<std::size_t>(literal)].floatValue[0] = floatValue;
@@ -3723,7 +3780,7 @@ SpliceAuthoringResult CreateAlternatingWarpTemplate(BrxDocument &document, const
     const auto previousModule = controller.spliceIndex;
     std::ostringstream source;
     source << "; Alternating WARP generated from ProjectCane semantics.\n"
-           << "; Trigger [2] calls WARP Trigger EOPID 162; false starts at A.\n"
+           << "; Trigger [2] calls the WARP Trigger native method; false starts at A.\n"
            << "(begin\n";
     if (previousModule >= 0 && static_cast<std::size_t>(previousModule) < document.SpliceModules().size())
         source << "  (import " << previousModule << ")\n";
@@ -3732,11 +3789,11 @@ SpliceAuthoringResult CreateAlternatingWarpTemplate(BrxDocument &document, const
            << "    (lambda ($self)\n"
            << "      (if $alternatingWarpState\n"
            << "          (begin\n"
-           << "            (seto! (find-object " << secondWarp.oid << " tag#0:0) 162 0)\n"
+           << "            ((geto (find-object " << secondWarp.oid << " tag#0:0) WARP.Triggerwarp))\n"
            << "            (set! $alternatingWarpState false)\n"
            << "            true)\n"
            << "          (begin\n"
-           << "            (seto! (find-object " << firstWarp.oid << " tag#0:0) 162 0)\n"
+           << "            ((geto (find-object " << firstWarp.oid << " tag#0:0) WARP.Triggerwarp))\n"
            << "            (set! $alternatingWarpState true)\n"
            << "            true))))\n"
            << ")\n";

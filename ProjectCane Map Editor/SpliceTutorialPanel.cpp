@@ -1,11 +1,59 @@
 #include "SpliceTutorialPanel.h"
+#include "SpliceRuntime.h"
 
 #include <imgui.h>
 
 #include <string>
+#include <iterator>
 
 namespace
 {
+struct SyntaxEntry
+{
+    const char *name;
+    const char *usage;
+    const char *description;
+};
+
+constexpr SyntaxEntry syntaxEntries[]{
+#include "SpliceSyntaxHelp.inc"
+};
+constexpr SyntaxEntry builtinEntries[]{
+#include "SpliceBuiltinHelp.inc"
+};
+static_assert(std::size(builtinEntries) == 125);
+constexpr SyntaxEntry eventEntries[]{
+#include "SpliceEventHelp.inc"
+};
+static_assert(std::size(eventEntries) == 30);
+
+void DrawSyntaxReference(const SyntaxEntry *entries, const std::size_t count, const char *source)
+{
+    static ImGuiTextFilter search;
+    search.Draw("Search syntax or description", -1.0f);
+    ImGui::TextDisabled("Source: %s", source);
+    ImGui::TextWrapped("Usage lines describe argument order. [optional] and ... are notation; replace them with actual expressions. Names such as object, value and procedure are placeholders.");
+    ImGui::BeginChild("ReferenceEntries", ImVec2(0.0f, 0.0f));
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        const auto &entry = entries[index];
+        const auto haystack = std::string(entry.name) + " " + entry.usage + " " + entry.description;
+        if (!search.PassFilter(haystack.c_str()))
+            continue;
+        ImGui::PushID(static_cast<int>(index));
+        if (ImGui::CollapsingHeader(entry.name, ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::TextWrapped("Usage: %s", entry.usage);
+            ImGui::TextWrapped("%s", entry.description);
+            if (ImGui::SmallButton("Copy usage"))
+                ImGui::SetClipboardText(entry.usage);
+            ImGui::Spacing();
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+}
+
 void Heading(const char *text)
 {
     ImGui::SeparatorText(text);
@@ -56,7 +104,7 @@ void DrawSpliceTutorialPanel(bool &open, bool &openSpliceEvents, bool &openObjec
     if (!open)
         return;
     ImGui::SetNextWindowSize(ImVec2(1050.0f, 760.0f), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Splice Tutorial", &open))
+    if (!ImGui::Begin("Splice Syntax & Property Reference", &open))
     {
         ImGui::End();
         return;
@@ -71,10 +119,35 @@ void DrawSpliceTutorialPanel(bool &open, bool &openSpliceEvents, bool &openObjec
     if (ImGui::Button("Browse object operations"))
         openObjectOperations = true;
     ImGui::TextWrapped(
-        "This tutorial describes the serialized scripting system used by the original game. Editor object names are authoring aliases only; exported scripts contain numeric OIDs, EOPIDs, symbols, and expression nodes.");
+        "This reference describes the serialized scripting system used by the original game. Editor object/property names are authoring aliases; exported scripts contain numeric OIDs, native option IDs, symbols, and expression nodes.");
 
-    if (ImGui::BeginTabBar("SpliceTutorialTabs"))
+    if (ImGui::BeginTabBar("SpliceTutorialTabs", ImGuiTabBarFlags_FittingPolicyScroll))
     {
+        if (ImGui::BeginTabItem("Syntax reference"))
+        {
+            DrawSyntaxReference(syntaxEntries, std::size(syntaxEntries), "ProjectCane eval.cpp, ref.h; editor SpliceRuntime.cpp");
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("All 125 built-ins"))
+        {
+            DrawSyntaxReference(builtinEntries, std::size(builtinEntries), "ProjectCane eval.cpp / g_mpbifkbif and bif.cpp");
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("All 30 event symbols"))
+        {
+            DrawSyntaxReference(eventEntries, std::size(eventEntries), "ProjectCane lo.h / lo.cpp and native class dispatch sites");
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Properties & actions"))
+        {
+            Heading("Named properties, queries and methods");
+            Paragraph("Open Object Operations Reference to browse every class's inherited operations. Each entry shows its exact source token, native script option ID, value type, access mode, usage and native descriptor binding. A property can be stored in BRX yet have no runtime setter; the two access modes are different.");
+            if (ImGui::Button("Open searchable property reference"))
+                openObjectOperations = true;
+            Paragraph("Hidden is a writable Boolean: (seto! @Target ALO.Hidden true) hides it; false shows it. Frozen is read-only: (geto @Target ALO.Frozen). Neither changes the syntax of geto/seto!. Qualified names are editor authoring tokens and export as native numeric option IDs.");
+            Paragraph("For a native method, retrieve and then call it: ((geto @Destination WARP.Triggerwarp)). The target must expose that operation. Changing a script's owner does not change the class of @Destination. Raw numeric operands remain supported and retain their original value.");
+            ImGui::EndTabItem();
+        }
         if (ImGui::BeginTabItem("Start here"))
         {
             Heading("What Splice is");
@@ -87,7 +160,7 @@ void DrawSpliceTutorialPanel(bool &open, bool &openSpliceEvents, bool &openObjec
             Bullet(
                 "OID:",
                 "The runtime identity used to find another object. Duplicate OIDs are resolved through hierarchy and PROXY/PXR context.");
-            Bullet("EOPID:", "A numeric property or action exposed by a CID. For example, WARP Trigger is EOPID 162.");
+            Bullet("Property or method:", "An operation exposed by the target's class, such as ALO.Hidden or WARP.Triggerwarp. Use names from the reference; the editor emits the native script option ID.");
             Bullet(
                 "Editor alias:",
                 "A friendly @Name accepted by the editor and compiled back to the object's numeric OID. Use @{Name With Spaces} when the editor name is not one word.");
@@ -147,14 +220,14 @@ void DrawSpliceTutorialPanel(bool &open, bool &openSpliceEvents, bool &openObjec
             Bullet(
                 "object#0",
                 "The only portable BASIC literal: a null object pointer. Nonzero object# values are rejected because ProjectCane loads them as raw pointers, not OIDs.");
-            Bullet("(geto object EOPID)", "Reads an exposed property from the target object.");
+            Bullet("(geto object PropertyName)", "Reads an exposed property or retrieves a native method from the target object.");
             Bullet(
-                "(seto! object EOPID value)",
-                "Writes a property or invokes an exposed action. Void actions still occupy the serialized value argument slot; generated templates provide a harmless 0.");
+                "(seto! object PropertyName value)",
+                "Writes a property through its native setter. Retrieve and call native methods with ((geto object MethodName) arguments...) instead.");
 
             Heading("How to read nested code");
             Paragraph(
-                "Read from the inside outward. In (seto! (find-object 1434 tag#0:0) 162 0), find-object resolves OID 1434 using a null/global search basis. seto! then invokes EOPID 162 on that WARP. The final 0 fills the action call's serialized argument position; ProjectCane's WARP trigger thunk ignores it.");
+                "Read from the inside outward. In ((geto (find-object 1434 tag#0:0) WARP.Triggerwarp)), find-object resolves a WARP OID, geto retrieves its native Trigger method, and the outer parentheses call it with no arguments.");
             ImGui::TextColored(
                 ImVec4(1.0f, .55f, .3f, 1.0f),
                 "Do not use editor names as runtime identity. Renaming an object updates editor aliases, while export still emits the real OID.");
@@ -194,11 +267,11 @@ void DrawSpliceTutorialPanel(bool &open, bool &openSpliceEvents, bool &openObjec
             static constexpr char toggle[] =
                 "; Persistent Boolean toggle\n(begin\n  (define $enabled false)\n  (define sym#2\n    (lambda ($self)\n      (if $enabled\n          (begin\n            (set! $enabled false)\n            false)\n          (begin\n            (set! $enabled true)\n            true)))))\n";
             static constexpr char warp[] =
-                "; Trigger WARP OID 1434 (replace 1434)\n(begin\n  (define sym#2\n    (lambda ($self)\n      (begin\n        (seto! (find-object 1434 tag#0:0) 162 0)\n        true))))\n";
+                "; Trigger WARP OID 1434 (replace 1434)\n(begin\n  (define sym#2\n    (lambda ($self)\n      (begin\n        ((geto (find-object 1434 tag#0:0) WARP.Triggerwarp))\n        true))))\n";
             static constexpr char namedWarp[] =
-                "; Same operation with an editor-only alias\n; Rename the WARP to DestinationA first.\n(begin\n  (define sym#2\n    (lambda ($self)\n      (begin\n        (seto! @DestinationA 162 0)\n        true))))\n";
+                "; Same operation with an editor-only alias\n; Rename the WARP to DestinationA first.\n(begin\n  (define sym#2\n    (lambda ($self)\n      (begin\n        ((geto @DestinationA WARP.Triggerwarp))\n        true))))\n";
             static constexpr char alternating[] =
-                "; Alternate between two WARP destinations\n(begin\n  (define $useSecond false)\n  (define sym#2\n    (lambda ($self)\n      (if $useSecond\n          (begin\n            (seto! (find-object 2002 tag#0:0) 162 0)\n            (set! $useSecond false)\n            true)\n          (begin\n            (seto! (find-object 2001 tag#0:0) 162 0)\n            (set! $useSecond true)\n            true)))))\n";
+                "; Alternate between two WARP destinations\n(begin\n  (define $useSecond false)\n  (define sym#2\n    (lambda ($self)\n      (if $useSecond\n          (begin\n            ((geto (find-object 2002 tag#0:0) WARP.Triggerwarp))\n            (set! $useSecond false)\n            true)\n          (begin\n            ((geto (find-object 2001 tag#0:0) WARP.Triggerwarp))\n            (set! $useSecond true)\n            true)))))\n";
             CodeExample(
                 "trigger", "1. Minimal Trigger",
                 "The smallest useful event definition. It proves that the selected object receives Trigger [2].",

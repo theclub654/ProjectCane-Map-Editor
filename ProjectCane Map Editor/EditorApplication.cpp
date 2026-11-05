@@ -4022,7 +4022,7 @@ int RunEditorApplication()
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
-                ImGui::MenuItem("Splice Tutorial", nullptr, &showSpliceTutorial);
+                ImGui::MenuItem("Splice Syntax & Property Reference", nullptr, &showSpliceTutorial);
                 ImGui::MenuItem("CID Object Guide", nullptr, &showObjectUseGuide);
                 ImGui::MenuItem("Object Operations Reference", nullptr, &showObjectOperations);
                 ImGui::EndMenu();
