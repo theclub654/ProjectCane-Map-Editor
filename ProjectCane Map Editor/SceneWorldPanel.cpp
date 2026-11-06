@@ -204,6 +204,26 @@ void InitializeWorldDefault(BrxOptionRecord &property, const BrxWorldHeader &wor
 }
 }
 
+void SynchronizeSceneWorldOptions(BrxDocument &document)
+{
+    auto &world = document.EditableWorldHeader();
+    const BrxWorldHeader defaults;
+    world.worldMidtone = defaults.worldMidtone;
+    world.worldShadow = defaults.worldShadow;
+    std::copy_n(defaults.skyColor, 4, world.skyColor);
+    world.cameraFov = defaults.cameraFov;
+    world.cameraNearClip = defaults.cameraNearClip;
+    world.cameraFarClip = defaults.cameraFarClip;
+    world.cameraMrdRatio = defaults.cameraMrdRatio;
+    world.fogNear = defaults.fogNear;
+    world.fogFar = defaults.fogFar;
+    world.fogMaximum = defaults.fogMaximum;
+    std::copy_n(defaults.fogColor, 4, world.fogColor);
+    const SceneWorldPreviewCallbacks callbacks;
+    for (auto &option : document.EditableWorldOptions())
+        if (option.kind != BrxPropertyKind::Dynamic) ApplyPreview(option, world, callbacks);
+}
+
 void DrawSceneWorldPanel(bool &open, BrxDocument &document, std::string &status,
                          const SceneWorldPreviewCallbacks &preview)
 {

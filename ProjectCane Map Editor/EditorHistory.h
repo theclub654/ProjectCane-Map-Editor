@@ -26,6 +26,7 @@ template <class Snapshot, class Transform> class EditorHistory
 
     void Clear()
     {
+        ++mutationSerial_;
         undo_.clear();
         redo_.clear();
         position_ = 0;
@@ -35,6 +36,9 @@ template <class Snapshot, class Transform> class EditorHistory
     {
         return !undo_.empty();
     }
+    // Monotonic even when Undo restores identical document bytes. External
+    // staged edits must not mistake that later state for their original base.
+    [[nodiscard]] std::uint64_t MutationSerial() const { return mutationSerial_; }
     [[nodiscard]] bool CanRedo() const
     {
         return !redo_.empty();
@@ -68,6 +72,7 @@ template <class Snapshot, class Transform> class EditorHistory
 
     void Push(Entry entry)
     {
+        ++mutationSerial_;
         if (!redo_.empty() && savedPosition_ > position_)
             savedPosition_ = -1;
         undo_.push_back(std::move(entry));
@@ -88,6 +93,7 @@ template <class Snapshot, class Transform> class EditorHistory
         Entry entry = std::move(undo_.back());
         undo_.pop_back();
         apply(entry, false);
+        ++mutationSerial_;
         --position_;
         const std::string label = entry.label;
         redo_.push_back(std::move(entry));
@@ -101,6 +107,7 @@ template <class Snapshot, class Transform> class EditorHistory
         Entry entry = std::move(redo_.back());
         redo_.pop_back();
         apply(entry, true);
+        ++mutationSerial_;
         ++position_;
         const std::string label = entry.label;
         undo_.push_back(std::move(entry));
@@ -113,6 +120,7 @@ template <class Snapshot, class Transform> class EditorHistory
     std::size_t maximumEntries_ = 128;
     std::int64_t position_ = 0;
     std::int64_t savedPosition_ = 0;
+    std::uint64_t mutationSerial_ = 0;
 };
 
 template <class Snapshot, class Transform> using HistoryManager = EditorHistory<Snapshot, Transform>;

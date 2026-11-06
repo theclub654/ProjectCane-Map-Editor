@@ -35,4 +35,5 @@ struct SceneHierarchyAction
 
 void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, ImGuiWindowFlags flags, BrxDocument &document,
                              const ResolvedScene &resolvedScene, SceneRenderer &renderer, ImGuiTextFilter &filter,
-                             std::int32_t &lastSelectedObject, std::string &status, SceneHierarchyAction &action);
+                             std::int32_t &lastSelectedObject, std::string &status, SceneHierarchyAction &action,
+                             bool dockable = false);

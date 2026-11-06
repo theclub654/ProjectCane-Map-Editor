@@ -91,4 +91,20 @@
     <None Include="Resources\ProjectCane-logo.png" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" /><ImportGroup Label="ExtensionTargets" />
+  <ItemGroup>
+    <ClInclude Include="StudioNavigation.h" />
+    <ClInclude Include="CidAuthoringGuide.h" />
+    <ClInclude Include="ShapeEditing.h" />
+    <ClInclude Include="EditorDockLayout.h" />
+    <ClInclude Include="EditorMcpBridge.h" />
+    <ClInclude Include="EditorMcpTools.h" />
+    <ClInclude Include="EditorMcpOperations.h" />
+    <ClInclude Include="EditorMcpFiles.h" />
+    <ClInclude Include="EditorMcpRecords.h" />
+    <ClInclude Include="EditorMcpUi.h" />
+    <ClCompile Include="EditorMcpTools.cpp" />
+    <ClCompile Include="EditorMcpOperations.cpp" />
+    <ClCompile Include="EditorMcpFiles.cpp" />
+    <ClCompile Include="EditorMcpRecords.cpp" />
+  </ItemGroup>
 </Project>

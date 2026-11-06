@@ -1572,8 +1572,18 @@ bool WriteGlobset(PayloadWriter &writer, const BrxDocument &document, const std:
             error = "GLOB render group " + std::to_string(glob.renderGroup) + " has invalid bounds.";
             return false;
         }
-        writer.Floats(glob.center, 3);
-        writer.Pod(glob.radius);
+        float placedCenter[3]{glob.center[0], glob.center[1], glob.center[2]};
+        float placedRadius = glob.radius;
+        // Native instances serialize their changed matrix above, but retail
+        // does not derive GLOB bounds from it. Export the matching bound too.
+        // Direct geometry retains its own existing baking/serialization path.
+        if (glob.instanced && !document.PlacedGlobBounds(globalGlobIndex, placedCenter, placedRadius))
+        {
+            error = "GLOB placement produces invalid culling bounds.";
+            return false;
+        }
+        writer.Floats(placedCenter, 3);
+        writer.Pod(placedRadius);
         writer.Pod(glob.oid);
         writer.Pod(glob.rotationTracking);
         writer.Pod(glob.renderPhase);

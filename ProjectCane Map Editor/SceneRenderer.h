@@ -1199,6 +1199,14 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
         return projectionFar_;
     }
 
+    // Transform edits also affect non-rendering helpers (PNT/SPIRE/HND).
+    // Refresh their resolved frames without rebuilding textures or geometry.
+    void RefreshAuthoredObjectTransforms(const BrxDocument &document)
+    {
+        objects_ = document.Objects();
+        BuildAloxResolvedTransforms();
+    }
+
     [[nodiscard]] glm::mat4 ResolvedObjectTransform(const std::int32_t objectIndex) const
     {
         if (objectIndex < 0 || static_cast<std::size_t>(objectIndex) >= aloxResolvedWorld_.size())
@@ -1682,7 +1690,8 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
                 continue;
             for (const auto &batch : document.Globs()[globIndex].derivedBatches)
             {
-                if (batch.indexCount == 0 || batch.firstIndex >= indices_.size())
+                if (batch.indexCount == 0 || batch.firstIndex >= indices_.size() ||
+                    batch.indexCount > indices_.size() - batch.firstIndex)
                     continue;
                 const glm::mat4 model = SubmissionTransformForObject(batch.ownerObjectIndex);
                 const glm::vec3 center = glm::vec3(
@@ -1705,6 +1714,10 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
             const auto oldest =
                 std::min_element(modelThumbnails_.begin(), modelThumbnails_.end(), [](const auto &a, const auto &b)
                                  { return a.second.lastUsedFrame < b.second.lastUsedFrame; });
+            // ImGui submits images later. Never delete a texture already
+            // referenced by this frame's draw list to make room for another.
+            if (oldest != modelThumbnails_.end() && oldest->second.lastUsedFrame == thumbnailFrame_)
+                return 0;
             if (oldest != modelThumbnails_.end())
             {
                 glDeleteTextures(1, &oldest->second.texture);
@@ -1713,6 +1726,78 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
         }
         ModelThumbnailRecord thumbnail;
         thumbnail.lastUsedFrame = thumbnailFrame_;
+        // Thumbnail generation runs while constructing the UI. Do not inherit
+        // clipping/write state, or leave bindings changed for later renderers.
+        GLint oldDrawFramebuffer = 0, oldReadFramebuffer = 0, oldProgram = 0, oldVao = 0, oldViewport[4]{};
+        GLint oldActiveTexture = 0, oldTexture = 0, oldSampler = 0, oldRenderbuffer = 0, oldUnpackBuffer = 0;
+        GLint oldDepthFunc = 0, oldCullMode = 0, oldFrontFace = 0;
+        GLint oldSrcRgb = 0, oldDstRgb = 0, oldSrcAlpha = 0, oldDstAlpha = 0;
+        GLint oldEquationRgb = 0, oldEquationAlpha = 0;
+        GLfloat oldClearColor[4]{};
+        GLdouble oldClearDepth = 1.0;
+        GLboolean oldDepthMask = GL_TRUE, oldColorMask[4]{};
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &oldDrawFramebuffer);
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &oldReadFramebuffer);
+        glGetIntegerv(GL_CURRENT_PROGRAM, &oldProgram);
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &oldVao);
+        glGetIntegerv(GL_VIEWPORT, oldViewport);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &oldActiveTexture);
+        glActiveTexture(GL_TEXTURE0);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture);
+        glGetIntegerv(GL_SAMPLER_BINDING, &oldSampler);
+        glGetIntegerv(GL_RENDERBUFFER_BINDING, &oldRenderbuffer);
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &oldUnpackBuffer);
+        glGetIntegerv(GL_DEPTH_FUNC, &oldDepthFunc);
+        glGetIntegerv(GL_CULL_FACE_MODE, &oldCullMode);
+        glGetIntegerv(GL_FRONT_FACE, &oldFrontFace);
+        glGetIntegerv(GL_BLEND_SRC_RGB, &oldSrcRgb);
+        glGetIntegerv(GL_BLEND_DST_RGB, &oldDstRgb);
+        glGetIntegerv(GL_BLEND_SRC_ALPHA, &oldSrcAlpha);
+        glGetIntegerv(GL_BLEND_DST_ALPHA, &oldDstAlpha);
+        glGetIntegerv(GL_BLEND_EQUATION_RGB, &oldEquationRgb);
+        glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &oldEquationAlpha);
+        glGetFloatv(GL_COLOR_CLEAR_VALUE, oldClearColor);
+        glGetDoublev(GL_DEPTH_CLEAR_VALUE, &oldClearDepth);
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &oldDepthMask);
+        glGetBooleanv(GL_COLOR_WRITEMASK, oldColorMask);
+        const GLboolean hadDepth = glIsEnabled(GL_DEPTH_TEST), hadCull = glIsEnabled(GL_CULL_FACE),
+                        hadBlend = glIsEnabled(GL_BLEND), hadScissor = glIsEnabled(GL_SCISSOR_TEST),
+                        hadStencil = glIsEnabled(GL_STENCIL_TEST);
+        const auto restoreState = [&]()
+        {
+            glBindVertexArray(oldVao);
+            glUseProgram(oldProgram);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, oldDrawFramebuffer);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, oldReadFramebuffer);
+            glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+            glBindRenderbuffer(GL_RENDERBUFFER, oldRenderbuffer);
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, oldUnpackBuffer);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, oldTexture);
+            glBindSampler(0, oldSampler);
+            glActiveTexture(oldActiveTexture);
+            glDepthFunc(oldDepthFunc);
+            glDepthMask(oldDepthMask);
+            glColorMask(oldColorMask[0], oldColorMask[1], oldColorMask[2], oldColorMask[3]);
+            glCullFace(oldCullMode);
+            glFrontFace(oldFrontFace);
+            glBlendFuncSeparate(oldSrcRgb, oldDstRgb, oldSrcAlpha, oldDstAlpha);
+            glBlendEquationSeparate(oldEquationRgb, oldEquationAlpha);
+            glClearColor(oldClearColor[0], oldClearColor[1], oldClearColor[2], oldClearColor[3]);
+            glClearDepth(oldClearDepth);
+            const auto restoreEnabled = [](GLenum capability, GLboolean enabled)
+            {
+                if (enabled) glEnable(capability);
+                else glDisable(capability);
+            };
+            restoreEnabled(GL_DEPTH_TEST, hadDepth);
+            restoreEnabled(GL_CULL_FACE, hadCull);
+            restoreEnabled(GL_BLEND, hadBlend);
+            restoreEnabled(GL_SCISSOR_TEST, hadScissor);
+            restoreEnabled(GL_STENCIL_TEST, hadStencil);
+        };
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        glBindSampler(0, 0);
         glGenTextures(1, &thumbnail.texture);
         glBindTexture(GL_TEXTURE_2D, thumbnail.texture);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
@@ -1722,30 +1807,31 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glBindRenderbuffer(GL_RENDERBUFFER, thumbnailDepthBuffer_);
         glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, size, size);
-        GLint oldFramebuffer = 0, oldProgram = 0, oldVao = 0, oldViewport[4]{};
-        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &oldFramebuffer);
-        glGetIntegerv(GL_CURRENT_PROGRAM, &oldProgram);
-        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &oldVao);
-        glGetIntegerv(GL_VIEWPORT, oldViewport);
-        const GLboolean hadDepth = glIsEnabled(GL_DEPTH_TEST), hadCull = glIsEnabled(GL_CULL_FACE),
-                        hadBlend = glIsEnabled(GL_BLEND);
         glBindFramebuffer(GL_FRAMEBUFFER, thumbnailFramebuffer_);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, thumbnail.texture, 0);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, thumbnailDepthBuffer_);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
         {
-            glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
+            restoreState();
             glDeleteTextures(1, &thumbnail.texture);
             return 0;
         }
         glViewport(0, 0, size, size);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_STENCIL_TEST);
+        glDepthMask(GL_TRUE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDepthFunc(GL_LESS);
+        glClearDepth(1.0);
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
+        glFrontFace(GL_CCW);
         glEnable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glClearColor(0.035f, 0.045f, 0.060f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         const glm::vec3 direction = glm::normalize(glm::vec3(1.15f, -1.35f, 0.85f));
         const glm::mat4 view = glm::lookAt(center + direction * radius * 2.75f, center, glm::vec3(0, 0, 1));
         const glm::mat4 projection =
@@ -1784,16 +1870,7 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
                 GL_TRIANGLES, static_cast<GLsizei>(batch.indexCount), GL_UNSIGNED_INT,
                 reinterpret_cast<const void *>(static_cast<std::uintptr_t>(batch.firstIndex) * sizeof(std::uint32_t)));
         }
-        glBindVertexArray(oldVao);
-        glUseProgram(oldProgram);
-        glBindFramebuffer(GL_FRAMEBUFFER, oldFramebuffer);
-        glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
-        if (!hadDepth)
-            glDisable(GL_DEPTH_TEST);
-        if (!hadCull)
-            glDisable(GL_CULL_FACE);
-        if (!hadBlend)
-            glDisable(GL_BLEND);
+        restoreState();
         --thumbnailBudgetRemaining_;
         const GLuint result = thumbnail.texture;
         modelThumbnails_.emplace(stableId, thumbnail);
@@ -2253,6 +2330,9 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
             const float scale = std::max(glm::length(glm::vec3(delta[0])),
                                          std::max(glm::length(glm::vec3(delta[1])), glm::length(glm::vec3(delta[2]))));
             batch.boundsRadius *= scale;
+            batch.mrdRadius *= scale;
+            const auto rtckBase = delta * glm::make_mat4(batch.rtckBaseMatrix);
+            std::copy_n(glm::value_ptr(rtckBase), 16, batch.rtckBaseMatrix);
         }
         for (auto &batch : celBatches_)
         {
@@ -2900,17 +2980,13 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
             const auto sphereInFrustum = [&](const BrxRenderBatch &batch)
             {
                 const glm::mat4 placement = SubmissionTransformForObject(batch.ownerObjectIndex);
-                const bool mergedStatic = batch.ownerObjectIndex >= 0 &&
-                                          static_cast<std::size_t>(batch.ownerObjectIndex) < objects_.size() &&
-                                          objects_[static_cast<std::size_t>(batch.ownerObjectIndex)].cid == 4;
-                // RenderMsGlobset performs one frustum test with the GLOB
-                // center/radius before DrawGlob submits any SUBGLOB. Using
-                // each material's tighter bound can incorrectly remove only
-                // part of an MS GLOB near a frustum edge.
-                const float *centerSource = mergedStatic ? batch.sortCenter : batch.boundsCenter;
+                // RenderMsGlobset and RenderAloGlobset test GLOB bounds,
+                // never an individual material's SUBGLOB bounds. sortCenter
+                // and mrdRadius carry that placed GLOB sphere for every packet.
+                const float *centerSource = batch.sortCenter;
                 const glm::vec3 center =
                     glm::vec3(placement * glm::vec4(centerSource[0], centerSource[1], centerSource[2], 1.0f));
-                const float sourceRadius = mergedStatic ? batch.mrdRadius : batch.boundsRadius;
+                const float sourceRadius = batch.mrdRadius;
                 const float radius = sourceRadius * (std::max)({glm::length(glm::vec3(placement[0])),
                                                                 glm::length(glm::vec3(placement[1])),
                                                                 glm::length(glm::vec3(placement[2]))});
@@ -3037,14 +3113,10 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
                 if (owner >= 0 && static_cast<std::size_t>(owner) < objects_.size())
                 {
                     const auto &object = objects_[static_cast<std::size_t>(owner)];
-                    // The live game may normalize an ALO's effective MRDS as
-                    // it is attached to its hierarchy.  The editor has only
-                    // the serialized snapshot, so a finite authored GLOB MRD
-                    // must remain authoritative even when that snapshot says
-                    // MRDS_None.  Otherwise ordinary static objects and their
-                    // outlines remain visible forever.  MRDS_All still adds
-                    // the inherited whole-object test above.
-                    if (object.cid == 4 || object.mrdMode == 1 || batch.maximumRenderDistance < 1.0e9f)
+                    // RenderMsGlobset always tests GLOB MRD. RenderAloGlobset
+                    // does so only for MRDS_Glob (1); MRDS_All (2) uses the
+                    // whole-object limit above, and MRDS_None (0) skips MRD.
+                    if (object.cid == 4 || object.mrdMode == 1)
                     {
                         const glm::vec3 center =
                             glm::vec3(SubmissionTransformForObject(owner) *
@@ -3093,7 +3165,12 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
 
                 glm::mat4 baseModel(1.0f);
                 std::memcpy(glm::value_ptr(baseModel), batch.rtckBaseMatrix, sizeof(batch.rtckBaseMatrix));
-                const glm::vec3 center(batch.sortCenter[0], batch.sortCenter[1], batch.sortCenter[2]);
+                const glm::mat4 bakedBaseModel = baseModel;
+                baseModel = editorInstanceModel * baseModel;
+                // Packet centers already include editor placement. Align the
+                // placed base around that same world-space pivot, like retail.
+                const glm::vec3 center = glm::vec3(SubmissionTransformForObject(batch.ownerObjectIndex) *
+                    glm::vec4(batch.sortCenter[0], batch.sortCenter[1], batch.sortCenter[2], 1.0f));
 
                 // Exact AdjustAloRtckMat submission path used by both
                 // RenderAloGlobset and RenderMsGlobset. The recovered game
@@ -3126,7 +3203,7 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
 
                 // Editor vertices already contain baseModel, unlike the game
                 // vertex stream, so submit only the camera-tracking delta.
-                return editorInstanceModel * adjusted * glm::inverse(baseModel);
+                return adjusted * glm::inverse(bakedBaseModel);
             };
             glUniform1i(glGetUniformLocation(program_, "uAmbient"), 0);
             glUniform1i(glGetUniformLocation(program_, "uDiffuse"), 1);
@@ -3660,14 +3737,14 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
                     alpha *= inheritedCelBorderMrdAlpha(cel.ownerObjectIndex);
                     if (cel.ownerObjectIndex >= 0 && static_cast<std::size_t>(cel.ownerObjectIndex) < objects_.size())
                     {
-                        // Honor finite packet MRDs directly. The runtime can
-                        // change the owner's effective MRDS after loading, but
-                        // these authored limits remain the correct editor
-                        // preview for ordinary and cel-only GLOB packets.
-                        if (surface == nullptr && cel.surfaceMaximumDistance < 1.0e9f)
-                            alpha *= insideMrdAlpha(center, celRadius, cel.surfaceMaximumDistance);
-                        if (cel.maximumDistance < 1.0e9f)
-                            alpha *= insideMrdAlpha(center, celRadius, cel.maximumDistance);
+                        const auto &owner = objects_[static_cast<std::size_t>(cel.ownerObjectIndex)];
+                        if (owner.cid == 4 || owner.mrdMode == 1)
+                        {
+                            if (surface == nullptr)
+                                alpha *= insideMrdAlpha(center, celRadius, cel.surfaceMaximumDistance);
+                            if (cel.maximumDistance < cel.surfaceMaximumDistance)
+                                alpha *= insideMrdAlpha(center, celRadius, cel.maximumDistance);
+                        }
                     }
                     if (alpha <= 0.0f)
                         continue;

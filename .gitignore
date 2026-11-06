@@ -25,3 +25,7 @@ compile_commands.json
 *.log
 imgui.ini
 ProjectCaneMapEditor.ui
+
+# Local MCP Python environment and bytecode.
+/mcp/.venv/
+__pycache__/

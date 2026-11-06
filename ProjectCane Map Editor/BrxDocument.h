@@ -1247,6 +1247,12 @@ class BrxDocument
         return fonts_;
     }
     std::size_t AddBitmap(BrxBitmapRecord bitmap);
+    // A staged snapshot must never rewind allocation after an intervening
+    // create/delete or undo sequence. This counter is editor-only identity.
+    void PreserveEditorResourceIdentityFloor(const BrxDocument &previous)
+    {
+        nextEditorResourceId_ = (std::max)(nextEditorResourceId_, previous.nextEditorResourceId_);
+    }
     std::size_t DuplicateBitmap(std::size_t bitmapIndex);
     bool DeleteBitmapAndRemap(std::size_t bitmapIndex, std::int32_t replacementIndex);
     std::size_t AddShader(BrxShaderRecord shader);
@@ -1318,6 +1324,8 @@ class BrxDocument
         return globsets_;
     }
     bool CommitGlobEdit(std::size_t globIndex);
+    // Native-coordinate bounds with editor-only placement applied exactly once.
+    bool PlacedGlobBounds(std::size_t globIndex, float *center, float &radius) const;
     bool ApplyGlobGeometryTransform(std::size_t globIndex, const glm::mat4 &delta);
     std::size_t DuplicateGlobAsInstance(std::size_t sourceGlobRecordIndex);
     bool MakeGlobUnique(std::size_t globIndex, std::string *error = nullptr);
@@ -1511,6 +1519,8 @@ class BrxDocument
   private:
     friend class BrxLoader;
     friend class EditorProject;
+    bool MaterializeGlobRenderGeometry(std::size_t globIndex);
+    bool RebuildProjectRenderGeometry();
     bool OpenReadOnlyInPlace(const std::filesystem::path &path, std::string &error);
     std::filesystem::path path_;
     std::uint32_t version_ = 0;

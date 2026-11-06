@@ -507,6 +507,7 @@ bool ParseGlb(const std::filesystem::path &p, const ModelImportOptions &o, std::
             out.push_back(std::move(m));
         }
     std::size_t importedPrimitive = 0;
+    std::unordered_map<int, std::shared_ptr<const std::vector<std::uint8_t>>> embeddedGlbImages;
     if (j.contains("materials"))
         for (std::size_t meshIndex = 0; meshIndex < j["meshes"].size(); ++meshIndex)
             for (const auto &primitive : j["meshes"][meshIndex]["primitives"])
@@ -538,9 +539,39 @@ bool ParseGlb(const std::filesystem::path &p, const ModelImportOptions &o, std::
                     if (textureIndex >= 0 && static_cast<std::size_t>(textureIndex) < j["textures"].size())
                     {
                         const int imageIndex = j["textures"][textureIndex].value("source", -1);
-                        if (imageIndex >= 0 && static_cast<std::size_t>(imageIndex) < j["images"].size() &&
-                            j["images"][imageIndex].contains("uri"))
-                            mesh.diffuseTexture = p.parent_path() / j["images"][imageIndex]["uri"].get<std::string>();
+                        if (imageIndex >= 0 && static_cast<std::size_t>(imageIndex) < j["images"].size())
+                        {
+                            const auto &image = j["images"][imageIndex];
+                            if (image.contains("uri"))
+                                mesh.diffuseTexture = p.parent_path() / image["uri"].get<std::string>();
+                            else if (image.contains("bufferView"))
+                            {
+                                const int viewIndex = image["bufferView"].get<int>();
+                                if (!j.contains("bufferViews") || viewIndex < 0 ||
+                                    static_cast<std::size_t>(viewIndex) >= j["bufferViews"].size())
+                                {
+                                    error = "GLB material image references an invalid bufferView.";
+                                    return false;
+                                }
+                                const auto &view = j["bufferViews"][viewIndex];
+                                const auto offset = view.value("byteOffset", std::size_t{0});
+                                const auto length = view.value("byteLength", std::size_t{0});
+                                if (view.value("buffer", 0) != 0 || offset > binSize ||
+                                    length == 0 || length > binSize - offset)
+                                {
+                                    error = "GLB material image exceeds its embedded BIN buffer.";
+                                    return false;
+                                }
+                                auto found = embeddedGlbImages.find(imageIndex);
+                                if (found == embeddedGlbImages.end())
+                                    found = embeddedGlbImages.emplace(imageIndex,
+                                        std::make_shared<const std::vector<std::uint8_t>>(
+                                            bin + offset, bin + offset + length)).first;
+                                mesh.embeddedDiffuseTexture = found->second;
+                                mesh.diffuseTextureKey = p.lexically_normal().string() +
+                                    "|GLB embedded " + std::to_string(imageIndex);
+                            }
+                        }
                     }
                 }
             }
@@ -2688,9 +2719,14 @@ ModelImportResult ImportStaticModel(const std::filesystem::path &path, BrxDocume
         glob.center[1] = worldCenter.y;
         glob.center[2] = worldCenter.z;
         glob.radius *= worldScale;
-        ownerObject.renderRadiusSelf = glob.radius;
-        ownerObject.renderRadiusAll = glob.radius;
     }
+    // RenderAloAll centers its sphere on the ALO origin, not GLOB::posCenter.
+    // Include the mesh's offset and the owner's scale for every ALO subtype.
+    const glm::mat4 ownerWorld = glm::make_mat4(ownerObject.worldTransform);
+    const float ownerScale = (std::max)({glm::length(glm::vec3(ownerWorld[0])),
+        glm::length(glm::vec3(ownerWorld[1])), glm::length(glm::vec3(ownerWorld[2]))});
+    const float originRadius = glm::length(glm::vec3(ownerWorld * glm::vec4(center, 1.0f)) -
+        glm::vec3(ownerWorld[3])) + glm::length(upper - center) * ownerScale;
 
     result.globIndex = document.EditableGlobs().size();
     document.EditableGlobs().push_back(std::move(glob));
@@ -2718,6 +2754,8 @@ ModelImportResult ImportStaticModel(const std::filesystem::path &path, BrxDocume
         result.message = "Imported geometry could not build render packets.";
         return result;
     }
+    ownerObject.renderRadiusSelf = (std::max)(ownerObject.renderRadiusSelf, originRadius);
+    ownerObject.renderRadiusAll = (std::max)(ownerObject.renderRadiusAll, ownerObject.renderRadiusSelf);
     result.succeeded = true;
     result.message = "Imported " + std::to_string(result.triangleCount) + " triangles from " +
                      path.filename().string() + " (game-scale radius " + std::to_string(glm::length(upper - center)) +
@@ -2965,9 +3003,10 @@ bool BuildModelCollision(BrxDocument &document, const int ownerObjectIndex, cons
         message = "Generated gameplay collision requires an SO-derived object.";
         return false;
     }
-    // Editor-created model SOs use local geometry. Rebuild local GLOB bounds
-    // from the authoritative SUBGLOB source; the object's ALO transform moves
-    // both rendering and collision through the same runtime path.
+    // Recompute from local source geometry, preserving LoadAloFromBrx's bound
+    // conventions: fixed SO GLOB bounds are world-space, movable SO GLOB
+    // bounds are local-space, and ALO render radii surround the world origin
+    // of the object rather than the mesh center.
     if (object.offset == 0)
     {
         float largestRadius = 0.0f;
@@ -2984,15 +3023,20 @@ bool BuildModelCollision(BrxDocument &document, const int ownerObjectIndex, cons
                 localUpper = glm::max(localUpper, center + glm::vec3(subglob.radius));
             }
             const glm::vec3 localCenter = (localLower + localUpper) * 0.5f;
-            glob.center[0] = localCenter.x;
-            glob.center[1] = localCenter.y;
-            glob.center[2] = localCenter.z;
-            glob.radius = glm::length(localUpper - localCenter);
+            const glm::mat4 world = glm::make_mat4(object.worldTransform);
+            const float scale = (std::max)({glm::length(glm::vec3(world[0])),
+                glm::length(glm::vec3(world[1])), glm::length(glm::vec3(world[2]))});
+            const float worldRadius = glm::length(localUpper - localCenter) * scale;
+            const glm::vec3 worldCenter = glm::vec3(world * glm::vec4(localCenter, 1.0f));
+            const glm::vec3 cullingCenter = object.so.fixedPhysics ? worldCenter : localCenter;
+            std::copy_n(&cullingCenter.x, 3, glob.center);
+            glob.radius = object.so.fixedPhysics ? worldRadius : glm::length(localUpper - localCenter);
             glob.modified = true;
-            largestRadius = (std::max)(largestRadius, glob.radius);
+            largestRadius = (std::max)(largestRadius,
+                glm::length(worldCenter - glm::vec3(world[3])) + worldRadius);
         }
         object.renderRadiusSelf = largestRadius;
-        object.renderRadiusAll = largestRadius;
+        object.renderRadiusAll = (std::max)(object.renderRadiusAll, largestRadius);
     }
     struct Part
     {

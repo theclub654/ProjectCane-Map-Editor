@@ -1582,37 +1582,8 @@ EditorOperationResult EditorDocumentOperations::CreatePipe(BrxDocument &document
     auto &object = document.EditableObjects()[static_cast<std::size_t>(result.primaryObjectIndex)];
     object.cid = 112;
     object.loaderName = "Editor-created PIPE";
-    const auto addInt = [&](const std::int16_t id, const std::int32_t value, const BrxPropertyKind kind)
-    {
-        BrxPropertyRecord property;
-        property.eopid = id;
-        property.kind = kind;
-        property.intValue = value;
-        property.boolValue = value != 0;
-        property.modified = true;
-        object.properties.push_back(std::move(property));
-    };
-    const auto addFloat = [&](const std::int16_t id, const float value)
-    {
-        BrxPropertyRecord property;
-        property.eopid = id;
-        property.kind = BrxPropertyKind::Float;
-        property.floatValue[0] = value;
-        property.modified = true;
-        object.properties.push_back(std::move(property));
-    };
-    BrxPropertyRecord facing;
-    facing.eopid = 643;
-    facing.kind = BrxPropertyKind::Vector3;
-    facing.floatValue[0] = 1.0f;
-    facing.modified = true;
-    object.properties.push_back(std::move(facing));
-    addInt(644, 8, BrxPropertyKind::Int16);
-    addInt(645, 9, BrxPropertyKind::Int16);
-    addInt(646, -1, BrxPropertyKind::Int16);
-    addInt(648, 0, BrxPropertyKind::Bool);
-    addInt(649, -1, BrxPropertyKind::Int16);
-    addFloat(651, (std::numeric_limits<float>::max)());
+    // Leave optional properties unauthored so the game supplies its defaults.
+    // The inspector's override checkboxes start unchecked.
 
     auto path = std::find_if(document.EditableShapePaths().begin(), document.EditableShapePaths().end(),
                              [&](const BrxShapePathRecord &candidate)
@@ -1656,41 +1627,8 @@ EditorOperationResult EditorDocumentOperations::CreateRail(BrxDocument &document
     auto &object = document.EditableObjects()[static_cast<std::size_t>(result.primaryObjectIndex)];
     object.cid = 113;
     object.loaderName = "Editor-created RAIL";
-    const auto addInt = [&](const std::int16_t id, const std::int32_t value, const BrxPropertyKind kind)
-    {
-        const auto definition = EditorOptionDefinitionForCid(object.cid, id);
-        BrxPropertyRecord property;
-        property.eopid = id;
-        property.kind = kind;
-        property.flags = definition.flags;
-        property.argumentCount = definition.argumentCount;
-        property.editable = true;
-        property.intValue = value;
-        property.boolValue = value != 0;
-        property.modified = true;
-        object.properties.push_back(std::move(property));
-    };
-    const auto addFloat = [&](const std::int16_t id, const float value)
-    {
-        const auto definition = EditorOptionDefinitionForCid(object.cid, id);
-        BrxPropertyRecord property;
-        property.eopid = id;
-        property.kind = BrxPropertyKind::Float;
-        property.flags = definition.flags;
-        property.argumentCount = definition.argumentCount;
-        property.editable = true;
-        property.floatValue[0] = value;
-        property.modified = true;
-        object.properties.push_back(std::move(property));
-    };
-
-    // InitRail plus SPA defaults.
-    addInt(1032, 0, BrxPropertyKind::Bool);
-    addFloat(1033, 1000.0f);
-    addFloat(1034, 2.0f);
-    addFloat(1035, (std::numeric_limits<float>::max)());
-    addInt(1036, 0, BrxPropertyKind::Bool);
-    addInt(1037, -1, BrxPropertyKind::Int16);
+    // Leave optional properties unauthored so the game supplies its defaults.
+    // The inspector's override checkboxes start unchecked.
 
     // JtbsChooseJtLanding excludes 50 units at each open endpoint. The base
     // SHAPE's 100-unit quick path therefore has an empty RAIL search range.
@@ -4704,7 +4642,8 @@ EditorOperationResult EditorDocumentOperations::MakeProxyRootUnique(BrxDocument 
 
 EditorOperationResult EditorDocumentOperations::ReparentObject(BrxDocument &document, const std::int32_t objectIndex,
                                                                const std::int32_t newParentIndex,
-                                                               const bool preserveWorldTransform)
+                                                               const bool preserveWorldTransform,
+                                                               const bool allowUnsupportedParent)
 {
     EditorOperationResult result;
     if (!ValidObjectIndex(document, objectIndex) || newParentIndex < -1 ||
@@ -4728,9 +4667,9 @@ EditorOperationResult EditorDocumentOperations::ReparentObject(BrxDocument &docu
     if (newParentIndex >= 0)
     {
         const auto &parent = document.Objects()[static_cast<std::size_t>(newParentIndex)];
-        if (((parent.cid == 116 || parent.cid == 125) && proxyMember.cid != 131) ||
+        if (!allowUnsupportedParent && (((parent.cid == 116 || parent.cid == 125) && proxyMember.cid != 131) ||
             (!CidDerivesFrom(parent.cid, 2) && parent.cid != 120 &&
-             !((parent.cid == 116 || parent.cid == 125 || parent.cid == 136) && proxyMember.cid == 131)))
+             !((parent.cid == 116 || parent.cid == 125 || parent.cid == 136) && proxyMember.cid == 131))))
         {
             result.message = "The destination cannot serialize this child. Use an ALO-derived parent, "
                              "EXPLG, or the dedicated embedded-animation tools.";
@@ -4834,7 +4773,7 @@ EditorOperationResult EditorDocumentOperations::ReparentObject(BrxDocument &docu
     }
     const bool isShape = CidDerivesFrom(document.Objects()[static_cast<std::size_t>(objectIndex)].cid, 110);
     const bool isPoint = CidDerivesFrom(document.Objects()[static_cast<std::size_t>(objectIndex)].cid, 126);
-    if ((isShape || isPoint) && newParentIndex >= 0 &&
+    if (!allowUnsupportedParent && (isShape || isPoint) && newParentIndex >= 0 &&
         !CidDerivesFrom(document.Objects()[static_cast<std::size_t>(newParentIndex)].cid, 2))
     {
         result.message =

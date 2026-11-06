@@ -1,6 +1,8 @@
 #include "CreateObjectCatalogPanel.h"
+#include "CidAuthoringGuide.h"
 
 #include "BrxDocument.h"
+#include "EditorCamera.h"
 #include "EditorDocumentOperations.h"
 #include "EditorWorkspace.h"
 #include "ObjectTypeRegistry.h"
@@ -8,14 +10,46 @@
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <array>
 #include <string>
 #include <vector>
+#include <glm/gtc/type_ptr.hpp>
 
 namespace
 {
 const char *CategoryForCid(const std::int16_t cid)
 {
+    // Class roles, not inheritance ranges: HND is traversal, FLASH is a
+    // detector, and KEYHOLE is a screen effect despite their technical names.
+    switch (cid)
+    {
+    case 30: case 77: case 107: case 109: case 132: case 133: case 146: case 147:
+        return "Runtime systems";
+    case 40: case 41: case 52: case 57: case 58:
+        return "Switches & mechanisms";
+    case 35: case 42: case 59: case 60: case 61: case 62: case 63: case 70: case 71: case 72: case 76: case 100: case 140:
+        return "Weapons & launchers";
+    case 47: case 48: case 49: case 50: case 51: case 54: case 55: case 96:
+        return "Security & hazards";
+    case 73: case 98: case 110: case 111: case 112: case 113: case 114: case 117: case 118:
+    case 126: case 127: case 128: case 129: case 130:
+        return "Traversal & markers";
+    case 44: case 45: case 46: case 56: case 85: case 86: case 87: case 88: case 89: case 90:
+    case 91: case 92: case 93: case 105: case 106: case 116: case 125:
+        return "Pickups, checkpoints & progression";
+    case 78: case 99: case 101: case 102: case 103: case 131: case 136: case 143: case 144:
+        return "Camera, dialog & animation";
+    case 31: case 108: case 123: case 124: case 134: case 135: case 137: case 138: case 139:
+        return "World, paths & visibility";
+    case 53:
+        return "Foundations & hierarchy";
+    case 80: case 81: case 82: case 84: case 94: case 97: case 119: case 120: case 121: case 122:
+    case 141: case 142: case 145:
+        return "Effects, rendering & destruction";
+    default:
+        break;
+    }
     if (cid <= 6 || cid == 43 || cid == 79 || cid == 83 || cid == 115)
         return "Foundations & hierarchy";
     if ((cid >= 7 && cid <= 29) || (cid >= 64 && cid <= 76) || cid == 95 || cid == 104 || cid == 105)
@@ -36,189 +70,8 @@ const char *CategoryForCid(const std::int16_t cid)
 
 const char *FriendlyName(const std::int16_t cid)
 {
-    switch (cid)
-    {
-    case 0:
-        return "Runtime Object Foundation";
-    case 1:
-        return "Level Object";
-    case 2:
-        return "Renderable Object";
-    case 3:
-        return "Physical Object";
-    case 4:
-        return "Model Set";
-    case 5:
-        return "Physical Gameplay Object";
-    case 6:
-        return "Step Platform";
-    case 7:
-        return "Sly Player Rig";
-    case 8:
-        return "Patrol Guard";
-    case 9:
-        return "Smart Guard";
-    case 10:
-        return "Gomer Guard";
-    case 23:
-        return "Vault";
-    case 30:
-        return "Runtime Particle Group";
-    case 31:
-        return "Water Surface";
-    case 32:
-        return "Breakable Base";
-    case 33:
-        return "Standard Breakable";
-    case 37:
-        return "Fragile Object";
-    case 40:
-        return "Physical Switch";
-    case 41:
-        return "Volume Button";
-    case 46:
-        return "Clue Bottle";
-    case 47:
-        return "Alarm Controller";
-    case 48:
-        return "Detector Base";
-    case 49:
-        return "Laser Detector";
-    case 50:
-        return "Camera Detector";
-    case 52:
-        return "Barrier";
-    case 56:
-        return "Checkpoint";
-    case 57:
-        return "Conveyor";
-    case 59:
-        return "Bomb";
-    case 60:
-        return "Missile";
-    case 61:
-        return "Accelerating Missile";
-    case 62:
-        return "Targeted Missile";
-    case 63:
-        return "Mine";
-    case 76:
-        return "Decoy";
-    case 77:
-        return "Particle Group";
-    case 78:
-        return "Camera";
-    case 80:
-        return "Particle Emitter";
-    case 81:
-        return "Light";
-    case 83:
-        return "Reusable Object Instance";
-    case 84:
-        return "Sky";
-    case 85:
-        return "Dynamic Prize Base";
-    case 86:
-        return "Charm Award";
-    case 87:
-        return "Life Token";
-    case 88:
-        return "Coin";
-    case 89:
-        return "Key";
-    case 90:
-        return "Timed-Challenge Gold";
-    case 91:
-        return "Vehicle Boost";
-    case 92:
-        return "Lock";
-    case 97:
-        return "Dynamic Shadow Helper";
-    case 98:
-        return "Waypoint";
-    case 100:
-        return "Dialog Localization Helper";
-    case 101:
-        return "Dialog Sequence";
-    case 102:
-        return "Dialog Speaker";
-    case 108:
-        return "Scene World";
-    case 109:
-        return "Camera Manager";
-    case 110:
-        return "General Path";
-    case 111:
-        return "Hiding Path";
-    case 112:
-        return "Climbable Pipe";
-    case 113:
-        return "Traversal Rail";
-    case 114:
-        return "Enemy Landing Path";
-    case 115:
-        return "Transform Marker";
-    case 116:
-        return "Warp Destination";
-    case 117:
-        return "Target Marker";
-    case 118:
-        return "Grab Handhold";
-    case 119:
-        return "Explosion Marker Base";
-    case 120:
-        return "Explosion Group";
-    case 121:
-        return "Explosion Emitter Base";
-    case 122:
-        return "Particle Explosion";
-    case 123:
-        return "Trigger Volume";
-    case 125:
-        return "Level Exit";
-    case 126:
-        return "Point Marker";
-    case 127:
-        return "Hide Point";
-    case 128:
-        return "Jump Marker";
-    case 129:
-        return "Ninja Spire Point";
-    case 130:
-        return "Binocular Scan Label";
-    case 131:
-        return "Animation Segment";
-    case 132:
-        return "Runtime Animation Blend";
-    case 133:
-        return "Visibility Zone";
-    case 134:
-        return "Visibility Map";
-    case 136:
-        return "State Machine";
-    case 137:
-        return "Guard Squad Group";
-    case 138:
-        return "Navigation Zone";
-    case 139:
-        return "Reach Pose Map";
-    case 140:
-        return "Reusable Weapon Manager";
-    case 141:
-        return "Geometry Warp Renderer";
-    case 142:
-        return "Keyhole";
-    case 143:
-        return "Player Choreography";
-    case 144:
-        return "Rhythm Sequence";
-    case 145:
-        return "Screen Flash";
-    case 147:
-        return "Animation State Machine";
-    default:
-        return nullptr;
-    }
+    const auto *guide = FindCidAuthoringGuide(cid);
+    return guide ? guide->name : nullptr;
 }
 
 bool IsCatalogCid(const std::int16_t cid)
@@ -250,7 +103,7 @@ const char *ObjectSummary(const std::int16_t cid)
     case 3:
         return "Base physical object. SO extends a renderable object with collision surfaces, rigid-body state, mass, gravity, contacts, constraints, and camera-collision behavior.";
     case 4:
-        return "Model-set container used to group shared render resources and model hierarchies for the world. It is normally infrastructure owned by the level rather than ordinary placed scenery.";
+        return "Merged-scene hierarchy and physical world infrastructure. Edit the existing MS; it is not a reusable model-set asset or an ordinary placed prop.";
     case 5:
         return "Physical gameplay-object foundation. PO extends collision-capable objects with interaction, damage, state, and gameplay filters inherited by many concrete world objects.";
     case 6:
@@ -591,6 +444,9 @@ bool IsUnavailable(const std::int16_t cid, const char *&reason)
         reason =
             "RIPG is allocated into SW's reusable runtime particle-group pool. Author model-particle behavior on an EMITTER instead.";
         return true;
+    case 77:
+        reason = "BLIPG is allocated by the runtime sprite-particle pool. Author the effect on an EMITTER instead of creating a standalone pool object.";
+        return true;
     case 83:
         reason =
             "A PROXY requires an inline reusable source or a valid earlier source slot. Use Create reusable source from the selected hierarchy, then Create linked instance.";
@@ -692,11 +548,19 @@ EditorOperationResult CreateCatalogObject(BrxDocument &document, const std::int1
     case 130:
         return EditorDocumentOperations::CreateScan(document, parent, transform);
     case 138:
+    {
+        // PATHZONE stores its boundary in world space, rather than an ALO transform.
+        const glm::vec3 center = transform ? glm::vec3(transform[12], transform[13], transform[14])
+                                          : glm::vec3(0.0f);
         return EditorDocumentOperations::CreatePathZone(
             document,
             std::vector<std::array<float, 3>>{
-                {-200.0f, -200.0f, 0.0f}, {200.0f, -200.0f, 0.0f}, {200.0f, 200.0f, 0.0f}, {-200.0f, 200.0f, 0.0f}},
+                {center.x - 200.0f, center.y - 200.0f, center.z},
+                {center.x + 200.0f, center.y - 200.0f, center.z},
+                {center.x + 200.0f, center.y + 200.0f, center.z},
+                {center.x - 200.0f, center.y + 200.0f, center.z}},
             parent);
+    }
     default:
         return EditorDocumentOperations::CreateObject(document, cid, parent, transform);
     }
@@ -715,7 +579,7 @@ const char *ObjectExample(const std::int16_t cid)
     case 3:
         return "Use an SO-derived concrete object for a static platform that must render and provide gameplay collision.";
     case 4:
-        return "Keep the level's MS as the shared model-resource container; do not create a second ordinary scenery object in its place.";
+        return "Edit the level's existing merged-scene MS and inspect its model groups and physical world data; do not create a second MS as ordinary scenery.";
     case 5:
         return "Choose a PO-derived concrete CID for an object that must collide and respond to damage, cane, bomb, or other gameplay interactions.";
     case 6:
@@ -973,8 +837,243 @@ const char *ObjectExample(const std::int16_t cid)
 }
 }
 
+EditorOperationResult CreateObjectFromCatalog(BrxDocument &document, std::int16_t cid,
+                                              std::int32_t parent, const float *transform)
+{
+    const char *reason = nullptr;
+    if (cid < 0 || cid >= 148 || IsUnavailable(cid, reason))
+    {
+        EditorOperationResult result;
+        result.message = reason ? reason : "Invalid CID";
+        return result;
+    }
+    return CreateCatalogObject(document, cid, parent, transform);
+}
+
+namespace
+{
+bool HasCatalogPreset(const std::int16_t cid)
+{
+    // Keep this list aligned with the dedicated branches of CreateCatalogObject.
+    switch (cid)
+    {
+    case 31: case 40: case 41: case 42: case 49: case 50: case 52:
+    case 54: case 55: case 56: case 99: case 101:
+    case 110: case 111: case 112: case 113: case 114: case 115: case 116:
+    case 123: case 125: case 126: case 127: case 128: case 129: case 130: case 138:
+        return true;
+    default:
+        return false;
+    }
+}
+
+const char *CreationLabel(const std::int16_t cid)
+{
+    const char *reason = nullptr;
+    if (IsUnavailable(cid, reason))
+        return "Not directly creatable here";
+    return HasCatalogPreset(cid) ? "Starter preset - review setup" : "Basic record - setup required";
+}
+
+const char *SetupContract(const std::int16_t cid)
+{
+    switch (cid)
+    {
+    case 40:
+        return "Push switches read PNT stop children. Levers read XFM stop children excluding TARGET. HND children supply the switch hook. Review child order and switch mode together. [button.cpp: PostButtonLoad]";
+    case 41:
+        return "Review pusher OIDs and their lookup context. With no authored pusher OIDs, post-load enables player pushing. A nonempty OID list whose targets fail to resolve does not enable that fallback. [button.cpp: PostVolbtnLoad]";
+    case 42: case 71: case 100:
+        return "Review JLO, JLOVOL, JLOC and landing/target relationships as a launcher assembly. JLOC collects candidate XFM targets and is removed after setup. Creating one record does not supply the other parts. [jlo.cpp: BindJlovol, LoadJlocFromBrx, PostJlocLoad]";
+    case 118:
+        return "HND is a gameplay handhold loaded from XFM data, not a visible hook model. Inspect its parent physics and grab/release scripts separately. A copied model alone does not create a new handhold. [hnd.cpp: LoadHndFromBrx; jt.cpp: hook interaction]";
+    case 8: case 9: case 10:
+        return "Review inherited guard bindings and class-specific detection volumes and animations. PATHZONE binding is optional, not a requirement for every guard. A bare guard record is not a complete character assembly. [stepguard.cpp: BindStepguard; smartguard.cpp: PostSmartguardLoad; gomer.cpp: PostGomerLoad]";
+    case 35:
+        return "Review target bindings and the child DART template before testing. The runtime creates its dart pool from the configured assembly. [dartgun.cpp: BindDartgun, PostDartgunLoad]";
+    case 56:
+        return "Review checkpoint children, animation binding and state machine together. Test activation and respawn with the intended progress state. [chkpnt.cpp: LoadChkpntFromBrx, BindChkpnt, PostChkpntLoad]";
+    case 83:
+        return "Use the reusable-source and linked-instance workflow. Source identity and instance overrides are separate; inspect restrictions before making an instance unique. [proxy.cpp: LoadProxyFromBrx, PostProxyLoad]";
+    case 89: case 90: case 93: case 106:
+        return "Review progression identity and saved/world state before copying or changing OIDs. Existence in the editor does not guarantee availability in the current game state. [coin.cpp; pzo.cpp; hubprog.cpp]";
+    case 101:
+        return "Review event order, speaker references and anchor lookup. A nil anchor uses the dialog object's own OID for played-state lookup. [dialog.cpp: LoadDialogFromBrx, PostDialog]";
+    case 110: case 111: case 112: case 113: case 114:
+        return "Review curve coordinates, parent and intended consumer. Reparenting a SHAPE involves coordinate conversion; scaling a traversal path is not a promise of proportional travel time. [shape.cpp: SetShapeParent; steppipe.cpp]";
+    case 125:
+        return "Review destination level, warp and embedded animation entries before testing. Test the actual level transition, including its progression conditions. [xform.cpp: LoadExitFromBrx, PostExitLoad]";
+    case 131: case 136:
+        return "Review target bindings and ordered animation/state data against the intended owner. ASEGA and SMA are runtime applications, not additional authored world records. [aseg.cpp; sm.cpp; basic.h]";
+    case 133: case 134:
+        return "Use Visibility Studio. Native zones belong to VISMAP's BSP, leaf masks and one-hop records; standalone VISZONE objects do not create authored spatial zones. [vis.cpp: LoadVismapFromBrx; basic.h]";
+    case 139:
+        return "Preserve a validated reach lattice, tetrahedra, grid and 24 animation samples plus host/touch bindings. An empty record is not a usable reach map. [rchm.cpp: LoadRchmFromBrx, PostRchmLoad]";
+    default:
+        return nullptr;
+    }
+}
+}
+
+void DrawObjectSetupCard(const std::int16_t cid, const bool initiallyExpanded)
+{
+    if (!ImGui::CollapsingHeader("Object setup - requirements & creation",
+                               initiallyExpanded ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None))
+        return;
+    ImGui::PushTextWrapPos(0.0f);
+    const char *friendly = FriendlyName(cid);
+    ImGui::Text("%s | %s | CID %d", friendly ? friendly : BrxDocument::ClassName(cid),
+                BrxDocument::ClassName(cid), cid);
+    ImGui::TextWrapped("Catalog: %s", CreationLabel(cid));
+    const char *reason = nullptr;
+    if (IsUnavailable(cid, reason))
+        ImGui::TextWrapped("%s", reason);
+    else
+        ImGui::TextWrapped("%s", HasCatalogPreset(cid)
+            ? "Uses an existing editor preset. Review its targets and dependencies before testing in game."
+            : "Creates an initial record. For complex assemblies, start from a known working template and review its dependencies.");
+    ImGui::SeparatorText("Purpose");
+    ImGui::TextWrapped("%s", ObjectSummary(cid));
+    ImGui::SeparatorText("Setup checklist");
+    if (const auto *guide = FindCidAuthoringGuide(cid))
+    {
+        ImGui::TextWrapped("Next step: %s", guide->nextStep);
+        ImGui::TextWrapped("Keep in mind: %s", guide->caution);
+        if (ImGui::TreeNode("Source & detailed recipe"))
+        {
+            ImGui::TextWrapped("Source entry point: %s", guide->source);
+            if (const char *contract = SetupContract(cid))
+                ImGui::TextWrapped("%s", contract);
+            ImGui::TextWrapped("%s", ObjectExample(cid));
+            ImGui::TreePop();
+        }
+    }
+    else
+    {
+        if (const char *contract = SetupContract(cid))
+            ImGui::TextWrapped("%s", contract);
+        ImGui::TextWrapped("%s", ObjectExample(cid));
+    }
+    ImGui::TextWrapped("Guidance only - dependencies have not been validated by this card.");
+    ImGui::PopTextWrapPos();
+}
+
+bool DrawObjectRelationships(const BrxDocument &document, const ObjectTypeRegistry &registry,
+                             SceneRenderer &renderer, const std::int32_t objectIndex)
+{
+    if (objectIndex < 0 || static_cast<std::size_t>(objectIndex) >= document.Objects().size())
+        return false;
+    const auto &object = document.Objects()[static_cast<std::size_t>(objectIndex)];
+    bool editSettings = false;
+    if (ImGui::CollapsingHeader("Find related objects & references"))
+    {
+        ImGui::TextWrapped("Inspect the recorded assembly before changing it. Navigation changes selection only. A matching OID is a candidate, not proof of the runtime binding: each class has its own lookup scope and lifecycle.");
+        if (ImGui::Button("Edit this object's settings"))
+            editSettings = true;
+        const auto objectLink = [&](const std::int32_t index)
+        {
+            if (index < 0 || static_cast<std::size_t>(index) >= document.Objects().size())
+                return;
+            const auto &related = document.Objects()[static_cast<std::size_t>(index)];
+            const auto label = document.ObjectEditorLabel(index) + " (" + BrxDocument::ClassName(related.cid) +
+                               ", OID " + std::to_string(related.oid) + ")##object" + std::to_string(index);
+            if (ImGui::Selectable(label.c_str(), false))
+                renderer.SelectObject(index);
+        };
+        if (ImGui::TreeNode("Parent & direct children"))
+        {
+            ImGui::TextUnformatted("Recorded parent");
+            if (object.parentIndex >= 0)
+                objectLink(object.parentIndex);
+            else
+                ImGui::TextDisabled("World root");
+            if (object.proxyRuntimeParentIndex >= 0 && object.proxyRuntimeParentIndex != object.parentIndex)
+            {
+                ImGui::TextUnformatted("PROXY runtime parent");
+                objectLink(object.proxyRuntimeParentIndex);
+            }
+            ImGui::TextUnformatted("Recorded direct children (record order)");
+            ImGui::BeginChild("AssemblyChildren", ImVec2(0.0f, 150.0f), true);
+            std::size_t children = 0;
+            for (std::size_t index = 0; index < document.Objects().size(); ++index)
+                if (document.Objects()[index].parentIndex == objectIndex)
+                {
+                    objectLink(static_cast<std::int32_t>(index));
+                    ++children;
+                }
+            if (children == 0)
+                ImGui::TextDisabled("No recorded direct children");
+            ImGui::EndChild();
+            ImGui::TreePop();
+        }
+        if (ImGui::TreeNode("Authored object-reference fields"))
+        {
+            ImGui::TextWrapped("Only scalar reference fields identified by the existing CID schema are listed here. Omitted defaults, dynamic command arguments, fixed runtime lookups and generated objects are not a complete dependency list. No candidates does not by itself mean an error.");
+            static ImGuiTextFilter referenceFilter;
+            referenceFilter.Draw("Search reference fields", -1.0f);
+            ImGui::BeginChild("AssemblyReferences", ImVec2(0.0f, 220.0f), true);
+            std::size_t references = 0;
+            for (std::size_t propertyIndex = 0; propertyIndex < object.properties.size(); ++propertyIndex)
+            {
+                const auto &property = object.properties[propertyIndex];
+                const auto schema = registry.Properties().Describe(object.cid, property.eopid);
+                if (!schema.objectReference || !schema.writable ||
+                    (property.kind != BrxPropertyKind::Int16 && property.kind != BrxPropertyKind::TypedInt16 &&
+                     property.kind != BrxPropertyKind::Int32) ||
+                    !referenceFilter.PassFilter(schema.displayName.c_str()))
+                    continue;
+                ++references;
+                ImGui::PushID(static_cast<int>(propertyIndex));
+                const auto label = schema.displayName + " = " + std::to_string(property.intValue) + "##reference";
+                if (ImGui::TreeNode(label.c_str()))
+                {
+                    ImGui::TextWrapped("Expected: %s | EOPID %d", schema.referenceType.c_str(), property.eopid);
+                    std::size_t candidates = 0;
+                    // OID_Nil is a sentinel, not a request to find every nil-named record.
+                    if (property.intValue != -1)
+                        for (std::size_t index = 0; index < document.Objects().size(); ++index)
+                        {
+                            const auto &candidate = document.Objects()[index];
+                            if (candidate.oid != property.intValue || !registry.Properties().ReferenceAccepts(schema, candidate.cid))
+                                continue;
+                            objectLink(static_cast<std::int32_t>(index));
+                            ++candidates;
+                        }
+                    if (property.intValue == -1)
+                        ImGui::TextWrapped("Nil sentinel. Its meaning depends on this field; it may select a fallback or disable a binding.");
+                    else if (candidates == 0)
+                        ImGui::TextWrapped("No compatible same-OID candidates in the loaded document. Check this class's lookup rules and runtime-created resources.");
+                    else
+                        ImGui::Text("%zu candidate(s); runtime scope is not resolved by this list.", candidates);
+                    ImGui::TreePop();
+                }
+                ImGui::PopID();
+            }
+            if (references == 0)
+                ImGui::TextDisabled("No matching authored scalar reference fields.");
+            ImGui::EndChild();
+            ImGui::TreePop();
+        }
+        if (ImGui::TreeNode("Shared Splice record"))
+        {
+            ImGui::Text("Recorded Splice index: %d", object.spliceIndex);
+            ImGui::TextWrapped("Objects can share a module while its scripts still refer to fixed OIDs. This list shows equal recorded indices only, not which callbacks are bound or which objects a script uses.");
+            ImGui::BeginChild("SharedSpliceObjects", ImVec2(0.0f, 130.0f), true);
+            if (object.spliceIndex >= 0)
+                for (std::size_t index = 0; index < document.Objects().size(); ++index)
+                    if (index != static_cast<std::size_t>(objectIndex) &&
+                        document.Objects()[index].spliceIndex == object.spliceIndex)
+                        objectLink(static_cast<std::int32_t>(index));
+            ImGui::EndChild();
+            ImGui::TreePop();
+        }
+    }
+    return editSettings;
+}
+
 void DrawCreateObjectCatalogPanel(bool &open, BrxDocument &document, EditorWorkspace &workspace,
-                                  SceneRenderer &renderer, const std::int32_t selectedObjectIndex, std::string &status)
+                                  SceneRenderer &renderer, const std::int32_t selectedObjectIndex, std::string &status,
+                                  const EditorCamera &camera)
 {
     if (!open || !document.IsOpen())
         return;
@@ -988,20 +1087,33 @@ void DrawCreateObjectCatalogPanel(bool &open, BrxDocument &document, EditorWorks
     static ImGuiTextFilter filter;
     static bool parentToSelection = true;
     static bool closeAfterCreate = false;
+    static bool objectsInFrontOfCamera = true;
+    static std::int16_t setupCid = 118;
+    DrawObjectSetupCard(setupCid, true);
+    ImGui::Separator();
     filter.Draw("Search name, class, or CID", -1.0f);
     const bool validSelection =
         selectedObjectIndex >= 0 && static_cast<std::size_t>(selectedObjectIndex) < document.Objects().size();
     ImGui::Checkbox("Parent new object to selection", &parentToSelection);
     ImGui::SameLine();
     ImGui::Checkbox("Close after creating", &closeAfterCreate);
+    ImGui::Checkbox("Place new objects in front of camera", &objectsInFrontOfCamera);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("New objects start 500 units ahead of the camera. Parenting stays independent. Non-spatial records keep their native representation. Disable to use the selected object's origin or the root default.");
     if (parentToSelection && !validSelection)
         ImGui::TextDisabled("Nothing is selected; objects will be created at the world root.");
     ImGui::TextDisabled(
-        "Friendly names are shown first. Hover an object name or runtime class for its purpose, requirements, capabilities, and authoring support.");
+        "Select an object name to show its setup card above. Hover its runtime class for additional details.");
     ImGui::Separator();
 
     static constexpr std::array categories{"Foundations & hierarchy",
                                            "Characters, enemies & encounters",
+                                           "Switches & mechanisms",
+                                           "Weapons & launchers",
+                                           "Security & hazards",
+                                           "Traversal & markers",
+                                           "Pickups, checkpoints & progression",
+                                           "Camera, dialog & animation",
                                            "Effects, rendering & destruction",
                                            "Gameplay, interaction & progression",
                                            "Logic, dialog & animation",
@@ -1051,7 +1163,7 @@ void DrawCreateObjectCatalogPanel(bool &open, BrxDocument &document, EditorWorks
         {
             ImGui::TableSetupColumn("Object", ImGuiTableColumnFlags_WidthStretch, 0.56f);
             ImGui::TableSetupColumn("Technical", ImGuiTableColumnFlags_WidthStretch, 0.27f);
-            ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 86.0f);
+            ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 120.0f);
             for (const auto &type : types)
             {
                 if (!IsCatalogCid(type.cid))
@@ -1068,8 +1180,10 @@ void DrawCreateObjectCatalogPanel(bool &open, BrxDocument &document, EditorWorks
                 ImGui::TableNextRow();
                 ImGui::PushID(type.cid);
                 ImGui::TableSetColumnIndex(0);
-                ImGui::TextUnformatted(friendlyLabel.c_str());
+                if (ImGui::Selectable(friendlyLabel.c_str(), setupCid == type.cid))
+                    setupCid = type.cid;
                 DrawObjectTooltip(type, friendlyLabel.c_str(), unavailable, unavailableReason);
+                ImGui::TextWrapped("%s", CreationLabel(type.cid));
                 if (unavailable)
                     ImGui::TextDisabled("%s", unavailableReason);
                 ImGui::TableSetColumnIndex(1);
@@ -1078,13 +1192,26 @@ void DrawCreateObjectCatalogPanel(bool &open, BrxDocument &document, EditorWorks
                 ImGui::TextDisabled("CID %d | %zu editable fields", type.cid, type.writableOptions.size());
                 ImGui::TableSetColumnIndex(2);
                 ImGui::BeginDisabled(unavailable);
-                if (ImGui::Button("Create", ImVec2(-1.0f, 0.0f)))
+                if (ImGui::Button(HasCatalogPreset(type.cid) ? "Create preset" : "Create record", ImVec2(-1.0f, 0.0f)))
                 {
+                    setupCid = type.cid;
                     const std::int32_t parent = parentToSelection && validSelection ? selectedObjectIndex : -1;
                     const float *transform =
                         validSelection
                             ? document.Objects()[static_cast<std::size_t>(selectedObjectIndex)].worldTransform
                             : nullptr;
+                    glm::mat4 pathPlacement(1.0f);
+                    if (objectsInFrontOfCamera)
+                    {
+                        const auto cameraWorld = glm::inverse(camera.ViewMatrix());
+                        const glm::vec3 forward = glm::normalize(-glm::vec3(cameraWorld[2]));
+                        // Paths retain the camera-oriented drawing basis; ordinary
+                        // objects start upright rather than inheriting camera pitch.
+                        if (type.cid >= 110 && type.cid <= 114)
+                            pathPlacement = cameraWorld;
+                        pathPlacement[3] = glm::vec4(camera.Position() + forward * 500.0f, 1.0f);
+                        transform = glm::value_ptr(pathPlacement);
+                    }
                     const auto result = CreateCatalogObject(document, type.cid, parent, transform);
                     status = result.message;
                     if (result.succeeded)
@@ -1132,8 +1259,27 @@ void DrawObjectUseGuidePanel(bool &open, EditorWorkspace &workspace, bool &openC
     ImGui::BeginChild("ObjectUseList", ImVec2(365.0f, -1.0f), true);
     std::size_t visibleCount = 0;
     const char *previousCategory = nullptr;
+    std::vector<const ObjectTypeDescriptor *> guideTypes;
     for (const auto &type : types)
+        if (IsGuideCid(type.cid))
+            guideTypes.push_back(&type);
+    std::stable_sort(guideTypes.begin(), guideTypes.end(), [&](const auto *left, const auto *right)
     {
+        if (showCategoryHeaders)
+        {
+            const std::string leftCategory = CategoryForCid(left->cid);
+            const std::string rightCategory = CategoryForCid(right->cid);
+            if (leftCategory != rightCategory)
+                return leftCategory < rightCategory;
+        }
+        const char *leftName = FriendlyName(left->cid);
+        const char *rightName = FriendlyName(right->cid);
+        return std::string(leftName ? leftName : left->name.c_str()) <
+               std::string(rightName ? rightName : right->name.c_str());
+    });
+    for (const auto *guideType : guideTypes)
+    {
+        const auto &type = *guideType;
         if (!IsGuideCid(type.cid))
             continue;
         const char *friendly = FriendlyName(type.cid);
@@ -1198,6 +1344,7 @@ void DrawObjectUseGuidePanel(bool &open, EditorWorkspace &workspace, bool &openC
             }
             if (ImGui::BeginTabItem("Authoring checklist"))
             {
+                DrawObjectSetupCard(selectedCid, true);
                 ImGui::SeparatorText("What a complete setup needs");
                 ImGui::BulletText("A valid parent/hierarchy and OID context for this CID.");
                 if (selected->hasAppearance)

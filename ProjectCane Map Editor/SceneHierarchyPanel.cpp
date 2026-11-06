@@ -22,25 +22,32 @@
 void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const ImGuiWindowFlags panelFlags,
                              BrxDocument &document, const ResolvedScene &resolvedScene, SceneRenderer &sceneRenderer,
                              ImGuiTextFilter &objectFilter, std::int32_t &lastOutlinerObject, std::string &status,
-                             SceneHierarchyAction &action)
+                             SceneHierarchyAction &action, const bool dockable)
 {
     action = {};
-    ImGui::SetNextWindowPos(position);
-    ImGui::SetNextWindowSize(size);
-    ImGui::Begin("Scene", nullptr, panelFlags);
+    if (!dockable)
+    {
+        ImGui::SetNextWindowPos(position);
+        ImGui::SetNextWindowSize(size);
+    }
+    if (!ImGui::Begin("Scene", nullptr, panelFlags))
+    {
+        ImGui::End();
+        return;
+    }
     if (document.IsOpen())
     {
         ImGui::TextDisabled("OPEN LEVEL");
         ImGui::TextUnformatted(document.Path().filename().string().c_str());
+        ImGui::TextDisabled("%zu objects", document.Objects().size());
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Select an object to inspect it. Right-click for move, duplicate, replace, and hierarchy actions.");
         ImGui::Separator();
         const std::int32_t selectedObjectIndex = sceneRenderer.SelectedObjectIndex();
         const bool selectedObjectValid =
             selectedObjectIndex >= 0 && static_cast<std::size_t>(selectedObjectIndex) < document.Objects().size();
-        static bool focusSelectedHierarchy = false;
-        ImGui::BeginDisabled(!selectedObjectValid);
-        ImGui::Checkbox("Focus selected hierarchy", &focusSelectedHierarchy);
-        ImGui::EndDisabled();
-        const bool focusedHierarchy = selectedObjectValid && focusSelectedHierarchy;
+        // Follow selection automatically; clearing it restores the world tree.
+        const bool focusedHierarchy = selectedObjectValid;
         static std::int32_t previouslyFocusedObject = -1;
         static std::unordered_set<std::int32_t> collapsedHierarchyObjects;
         // Large retail worlds contain several thousand objects and GLOBs. The
@@ -146,7 +153,7 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                                     resolvedScene.Roots().size(), document.Globs().size());
                 objectFilter.Draw("Search", -1.0f);
                 if (!objectFilter.IsActive())
-                    ImGui::TextDisabled("Class, CID, OID, GLOB or SUBGLOB");
+                    ImGui::TextDisabled("Search names, types, or object IDs");
                 ImGui::Spacing();
                 if (ImGui::TreeNodeEx("World contents", ImGuiTreeNodeFlags_SpanAvailWidth))
                 {
@@ -412,7 +419,7 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                     ImGui::BeginDisabled(objectLocked);
                     if (ImGui::MenuItem("Move in viewport"))
                         action = {SceneHierarchyAction::Kind::MoveInViewport, resolvedObjectIndex};
-                    if (ImGui::MenuItem("Move under another object..."))
+                    if (ImGui::MenuItem("Select children for object..."))
                     {
                         moveObjectIndex = resolvedObjectIndex;
                         parentFilter.Clear();
@@ -659,41 +666,59 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                 ImGui::TreePop();
         }
         if (openMovePopup)
-            ImGui::OpenPopup("Move object under parent");
+            ImGui::OpenPopup("Select children for object");
         ImGui::SetNextWindowSize(ImVec2(480.0f, 420.0f), ImGuiCond_FirstUseEver);
-        if (ImGui::BeginPopupModal("Move object under parent", nullptr, ImGuiWindowFlags_NoCollapse))
+        if (ImGui::BeginPopupModal("Select children for object", nullptr, ImGuiWindowFlags_NoCollapse))
         {
             const bool validSource = moveObjectIndex >= 0 &&
                                      static_cast<std::size_t>(moveObjectIndex) < document.Objects().size();
-            ImGui::TextWrapped("Choose a new parent. The object keeps its world position and orientation.");
-            parentFilter.Draw("Find parent", -1.0f);
-            ImGui::BeginDisabled(!validSource);
-            if (ImGui::Selectable("World root (no parent)", false, ImGuiSelectableFlags_DontClosePopups))
-            {
-                action = {SceneHierarchyAction::Kind::MoveToParent, moveObjectIndex, -1};
-            }
-            ImGui::BeginChild("Parent choices", ImVec2(0.0f, -40.0f), true);
+            if (validSource)
+                ImGui::TextWrapped("Add children to: %s", document.ObjectEditorLabel(moveObjectIndex).c_str());
+            ImGui::TextWrapped("Click an object to attach it here, keeping its world position. Its existing children move with it. Each change can be undone.");
+            ImGui::TextWrapped("All parent classes are allowed here. Export validation reports relationships the game cannot serialize. Linked PROXY ownership rules still apply.");
+            parentFilter.Draw("Find child by name, class or OID", -1.0f);
+            ImGui::TextWrapped("%s", status.c_str());
+            ImGui::BeginDisabled(!validSource || sceneRenderer.IsObjectLocked(moveObjectIndex));
+            ImGui::BeginChild("Child choices", ImVec2(0.0f, -40.0f), true);
             for (std::size_t index = 0; index < document.Objects().size(); ++index)
             {
                 const auto candidate = static_cast<std::int32_t>(index);
                 if (candidate == moveObjectIndex)
                     continue;
-                const auto &parent = document.Objects()[index];
+                // A parent or ancestor cannot become its own descendant.
+                bool ancestor = false;
+                auto cursor = moveObjectIndex;
+                for (std::size_t steps = 0; validSource && cursor >= 0 &&
+                     static_cast<std::size_t>(cursor) < document.Objects().size() &&
+                     steps < document.Objects().size(); ++steps)
+                {
+                    if (cursor == candidate)
+                    {
+                        ancestor = true;
+                        break;
+                    }
+                    cursor = document.Objects()[static_cast<std::size_t>(cursor)].parentIndex;
+                }
+                if (ancestor)
+                    continue;
+                const auto &child = document.Objects()[index];
+                const bool alreadyChild = child.parentIndex == moveObjectIndex;
                 const std::string label = document.ObjectEditorLabel(candidate) + " | OID " +
-                                          std::to_string(parent.oid);
+                                          std::to_string(child.oid) + (alreadyChild ? " (already a child)" : "");
                 if (!parentFilter.PassFilter(label.c_str()))
                     continue;
                 ImGui::PushID(candidate);
-                if (ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_DontClosePopups))
+                ImGui::BeginDisabled(alreadyChild || sceneRenderer.IsObjectLocked(candidate));
+                if (ImGui::Selectable(label.c_str(), alreadyChild, ImGuiSelectableFlags_DontClosePopups))
                 {
-                    action = {SceneHierarchyAction::Kind::MoveToParent, moveObjectIndex, candidate};
-                    // Close the modal, rather than a popup nested in the child.
+                    action = {SceneHierarchyAction::Kind::MoveToParent, candidate, moveObjectIndex};
                 }
+                ImGui::EndDisabled();
                 ImGui::PopID();
             }
             ImGui::EndChild();
             ImGui::EndDisabled();
-            if (action.kind == SceneHierarchyAction::Kind::MoveToParent || ImGui::Button("Cancel"))
+            if (ImGui::Button("Done"))
             {
                 moveObjectIndex = -1;
                 ImGui::CloseCurrentPopup();

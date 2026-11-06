@@ -1,4 +1,5 @@
 #include "BrxDocument.h"
+#include "CidAuthoringGuide.h"
 #include "BrxLoader.h"
 
 #include <algorithm>
@@ -827,6 +828,21 @@ void BrxDocument::RebuildRenderPacketsFromGlobs()
                     effectiveZoneMask = 0u;
             }
         }
+        float placedCenter[3]{};
+        float placedRadius = 0.0f;
+        if (!PlacedGlobBounds(globIndex, placedCenter, placedRadius))
+            continue;
+        glm::mat4 boundsToWorld(1.0f);
+        if (glob.ownerObjectIndex >= 0 && static_cast<std::size_t>(glob.ownerObjectIndex) < objects_.size())
+        {
+            const auto &owner = objects_[static_cast<std::size_t>(glob.ownerObjectIndex)];
+            if (owner.cid != 4 && !(owner.so.present && owner.so.fixedPhysics))
+                boundsToWorld = glm::make_mat4(owner.worldTransform);
+        }
+        const glm::vec3 placedWorldCenter = glm::vec3(boundsToWorld *
+            glm::vec4(placedCenter[0], placedCenter[1], placedCenter[2], 1.0f));
+        const float placedWorldRadius = placedRadius * (std::max)({glm::length(glm::vec3(boundsToWorld[0])),
+            glm::length(glm::vec3(boundsToWorld[1])), glm::length(glm::vec3(boundsToWorld[2]))});
         for (std::size_t subglobIndex = 0; subglobIndex < glob.derivedBatches.size(); ++subglobIndex)
         {
             auto batch = glob.derivedBatches[subglobIndex];
@@ -871,6 +887,11 @@ void BrxDocument::RebuildRenderPacketsFromGlobs()
                 batch.boundsRadius *= scale;
                 batch.mrdRadius *= scale;
             }
+            // Native GLOB bounds are independent of the source geometry and
+            // instance matrix. Use the placed current-GLOB bound for MRD,
+            // MS frustum culling and the RTCK pivot, just as the game does.
+            std::copy_n(&placedWorldCenter.x, 3, batch.sortCenter);
+            batch.mrdRadius = placedWorldRadius;
             batch.hasExplicitSortZ = effectiveSortGlob->hasExplicitSortZ &&
                                      effectiveSortGlob->authoredSortZ != (std::numeric_limits<float>::max)();
             batch.explicitSortZ = glob.effectiveSortZ;
@@ -890,6 +911,8 @@ void BrxDocument::RebuildRenderPacketsFromGlobs()
         }
         for (auto cel : glob.derivedCelPackets)
         {
+            std::copy_n(&placedWorldCenter.x, 3, cel.center);
+            cel.radius = placedWorldRadius;
             cel.renderGroup = glob.renderGroup;
             cel.ownerObjectIndex = glob.ownerObjectIndex;
             cel.surfaceMaximumDistance = effectiveSurfaceMrd;
@@ -1016,15 +1039,49 @@ bool BrxDocument::ApplyGlobsetPosePreview(const std::size_t globsetIndex)
     return true;
 }
 
-bool BrxDocument::CommitGlobEdit(const std::size_t globIndex)
+bool BrxDocument::PlacedGlobBounds(const std::size_t globIndex, float *center, float &radius) const
+{
+    if (globIndex >= globs_.size() || center == nullptr)
+        return false;
+    const auto &glob = globs_[globIndex];
+    std::copy_n(glob.center, 3, center);
+    radius = glob.radius;
+    const float empty = (std::numeric_limits<float>::lowest)();
+    if (radius == empty && center[0] == empty && center[1] == empty && center[2] == empty)
+        return true; // Preserve the native empty-bounds tuple.
+    if (!glob.editorCreatedInstance && !glob.hasEditorPlacementTransform)
+        return true;
+    glm::mat4 boundsToWorld(1.0f);
+    if (glob.ownerObjectIndex >= 0 && static_cast<std::size_t>(glob.ownerObjectIndex) < objects_.size())
+    {
+        const auto &owner = objects_[static_cast<std::size_t>(glob.ownerObjectIndex)];
+        if (owner.cid != 4 && !(owner.so.present && owner.so.fixedPhysics))
+            boundsToWorld = glm::make_mat4(owner.worldTransform);
+    }
+    const float determinant = glm::determinant(boundsToWorld);
+    if (!std::isfinite(determinant) || std::abs(determinant) <= 0.000001f)
+        return false;
+    const auto placement = glm::make_mat4(glob.editorCreatedInstance
+        ? glob.instanceTransform : glob.editorPlacementTransform);
+    const glm::mat4 nativePlacement = glm::inverse(boundsToWorld) * placement * boundsToWorld;
+    const glm::vec3 placed = glm::vec3(nativePlacement * glm::vec4(center[0], center[1], center[2], 1.0f));
+    const float scale = (std::max)({glm::length(glm::vec3(nativePlacement[0])),
+        glm::length(glm::vec3(nativePlacement[1])), glm::length(glm::vec3(nativePlacement[2]))});
+    radius *= scale;
+    if (!std::isfinite(placed.x) || !std::isfinite(placed.y) || !std::isfinite(placed.z) || !std::isfinite(radius))
+        return false;
+    std::copy_n(&placed.x, 3, center);
+    return true;
+}
+
+bool BrxDocument::MaterializeGlobRenderGeometry(const std::size_t globIndex)
 {
     if (globIndex >= globs_.size())
         return false;
     auto &glob = globs_[globIndex];
-    // Loader-created GLOBs already own derived packets. A newly authored
-    // model starts with authoritative SUBGLOB data only, so materialize its
-    // renderer cache here instead of requiring importers to mutate the
-    // document's flattened GPU arrays directly.
+    // Loader-created GLOBs already own derived packets. Imported models and
+    // reopened projects start with source data only. Populate renderer caches
+    // without changing authored properties, instance matrices or dirty flags.
     if (glob.derivedBatches.empty() && !glob.sourceSubglobs.empty())
     {
         glm::mat4 sourceToWorld(1.0f);
@@ -1056,6 +1113,8 @@ bool BrxDocument::CommitGlobEdit(const std::size_t globIndex)
                 glm::vec3 normal = normalToWorld * glm::vec3(source.normal[0], source.normal[1], source.normal[2]);
                 if (glm::dot(normal, normal) > 0.000001f)
                     normal = glm::normalize(normal);
+                else
+                    normal = glm::vec3(0.0f, 1.0f, 0.0f);
                 destination.position[0] = position.x;
                 destination.position[1] = position.y;
                 destination.position[2] = position.z;
@@ -1085,12 +1144,115 @@ bool BrxDocument::CommitGlobEdit(const std::size_t globIndex)
             batch.zoneMask = glob.hasZoneMask ? glob.zoneMask : 0xffffffffu;
             batch.maximumRenderDistance = glob.maximumRenderDistance;
             batch.ownerObjectIndex = glob.ownerObjectIndex;
+            std::copy_n(glob.sourceToWorld, 16, batch.rtckBaseMatrix);
             authoredBatches.push_back(batch);
         }
         renderVertices_.insert(renderVertices_.end(), authoredVertices.begin(), authoredVertices.end());
         renderIndices_.insert(renderIndices_.end(), authoredIndices.begin(), authoredIndices.end());
         glob.derivedBatches = std::move(authoredBatches);
     }
+    if (glob.derivedCelPackets.empty() && !glob.sourceCelRecords.empty())
+    {
+        // SUBCEL stores four points per edge, in E0/E1/OA/OB order.
+        // Retain a packet for empty records too: pose preview indexes the
+        // source records and their derived packets in parallel.
+        for (const auto &source : glob.sourceCelRecords)
+            if (source.points.size() % 4 != 0)
+                return false;
+        const glm::mat4 sourceToWorld = glm::make_mat4(glob.sourceToWorld);
+        for (const auto &source : glob.sourceCelRecords)
+        {
+            BrxCelBatch packet;
+            packet.firstEdge = static_cast<std::uint32_t>(celEdges_.size());
+            packet.edgeCount = static_cast<std::uint32_t>(source.points.size() / 4);
+            packet.ownerObjectIndex = glob.ownerObjectIndex;
+            for (std::size_t edgeIndex = 0; edgeIndex < packet.edgeCount; ++edgeIndex)
+            {
+                BrxCelEdge edge;
+                for (std::size_t pointIndex = 0; pointIndex < 4; ++pointIndex)
+                {
+                    const auto &point = source.points[edgeIndex * 4 + pointIndex];
+                    const glm::vec3 position = glm::vec3(sourceToWorld *
+                        glm::vec4(point.position[0], point.position[1], point.position[2], 1.0f));
+                    std::copy_n(&position.x, 3, edge.points[pointIndex]);
+                    edge.points[pointIndex][3] = 1.0f;
+                }
+                celEdges_.push_back(edge);
+            }
+            glob.derivedCelPackets.push_back(packet);
+        }
+    }
+    return true;
+}
+
+bool BrxDocument::RebuildProjectRenderGeometry()
+{
+    // Projects serialize source geometry, never document-global GPU offsets.
+    // Discard every old cache (also for legacy projects opened over a BRX)
+    // before reconstructing independent ranges from the saved placements.
+    renderVertices_.clear();
+    renderIndices_.clear();
+    renderBatches_.clear();
+    celEdges_.clear();
+    celBatches_.clear();
+    for (auto &glob : globs_)
+    {
+        glob.derivedBatches.clear();
+        glob.derivedCelPackets.clear();
+    }
+    for (std::size_t index = 0; index < globs_.size(); ++index)
+    {
+        const auto firstVertex = renderVertices_.size();
+        const auto firstEdge = celEdges_.size();
+        if (!MaterializeGlobRenderGeometry(index))
+            return false;
+        // WRBG ranges also address the flattened caches, not source vertices.
+        // Editor instances can previously have shared another GLOB's ranges.
+        for (auto &binding : globWarps_)
+            if (binding.ownerObjectIndex == globs_[index].ownerObjectIndex &&
+                binding.renderGroup == globs_[index].renderGroup)
+            {
+                binding.firstVertex = static_cast<std::uint32_t>(firstVertex);
+                binding.vertexCount = static_cast<std::uint32_t>(renderVertices_.size() - firstVertex);
+                binding.firstCelEdge = static_cast<std::uint32_t>(firstEdge);
+                binding.celEdgeCount = static_cast<std::uint32_t>(celEdges_.size() - firstEdge);
+            }
+    }
+    std::unordered_set<std::size_t> posedGlobs;
+    for (std::size_t index = 0; index < globsets_.size(); ++index)
+    {
+        const auto &globset = globsets_[index];
+        if (globset.poseWeights.empty() ||
+            std::any_of(globset.globIndices.begin(), globset.globIndices.end(),
+                        [&](const auto globIndex) { return posedGlobs.contains(globIndex); }))
+            continue;
+        if (!ApplyGlobsetPosePreview(index))
+            return false;
+        posedGlobs.insert(globset.globIndices.begin(), globset.globIndices.end());
+    }
+    std::fill_n(renderBoundsMin_, 3, 0.0f);
+    std::fill_n(renderBoundsMax_, 3, 0.0f);
+    bool first = true;
+    for (const auto &vertex : renderVertices_)
+    {
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            renderBoundsMin_[axis] = first ? vertex.position[axis] :
+                (std::min)(renderBoundsMin_[axis], vertex.position[axis]);
+            renderBoundsMax_[axis] = first ? vertex.position[axis] :
+                (std::max)(renderBoundsMax_[axis], vertex.position[axis]);
+        }
+        first = false;
+    }
+    RebuildRenderPacketsFromGlobs();
+    return true;
+}
+
+bool BrxDocument::CommitGlobEdit(const std::size_t globIndex)
+{
+    if (!MaterializeGlobRenderGeometry(globIndex))
+        return false;
+    auto &glob = globs_[globIndex];
     const auto setPresenceBit = [&](const std::uint16_t bit, const bool present)
     {
         if (present)
@@ -1244,6 +1406,8 @@ bool BrxDocument::ApplyGlobGeometryTransform(const std::size_t globIndex, const 
         batch.sortCenter[2] = sortCenter.z;
         batch.boundsRadius *= radiusScale;
         batch.mrdRadius *= radiusScale;
+        const auto rtckBase = delta * glm::make_mat4(batch.rtckBaseMatrix);
+        std::copy_n(glm::value_ptr(rtckBase), 16, batch.rtckBaseMatrix);
     }
 
     for (auto &cel : glob.derivedCelPackets)
@@ -1591,6 +1755,8 @@ bool BrxDocument::MakeGlobUnique(const std::size_t globIndex, std::string *error
         bakePoint(batch.sortCenter);
         batch.boundsRadius *= bakeScale;
         batch.mrdRadius *= bakeScale;
+        const auto rtckBase = bakeTransform * glm::make_mat4(batch.rtckBaseMatrix);
+        std::copy_n(glm::value_ptr(rtckBase), 16, batch.rtckBaseMatrix);
         batch.hasEditorInstanceTransform = false;
         const glm::mat4 identity(1.0f);
         std::memcpy(batch.editorInstanceTransform, glm::value_ptr(identity), sizeof(batch.editorInstanceTransform));
@@ -1750,51 +1916,8 @@ const char *BrxDocument::ClassName(std::int16_t cid)
 
 std::string BrxDocument::EditorClassName(const std::int16_t cid)
 {
-    const char *friendlyName = nullptr;
-    switch (cid)
-    {
-    case 9:
-        friendlyName = "Smart Guard";
-        break;
-    case 30:
-        friendlyName = "Runtime Particle Group";
-        break;
-    case 56:
-        friendlyName = "Checkpoint";
-        break;
-    case 57:
-        friendlyName = "Conveyor";
-        break;
-    case 80:
-        friendlyName = "Particle Emitter";
-        break;
-    case 123:
-        friendlyName = "Trigger Volume";
-        break;
-    case 138:
-        friendlyName = "Navigation Zone";
-        break;
-    case 139:
-        friendlyName = "Reach Pose Map";
-        break;
-    case 140:
-        friendlyName = "Reusable Weapon Manager";
-        break;
-    case 141:
-        friendlyName = "Geometry Warp Renderer";
-        break;
-    case 142:
-        friendlyName = "Keyhole Transition Mask";
-        break;
-    case 143:
-        friendlyName = "Player Choreography";
-        break;
-    case 145:
-        friendlyName = "Screen Flash";
-        break;
-    default:
-        break;
-    }
+    const auto *guide = FindCidAuthoringGuide(cid);
+    const char *friendlyName = guide ? guide->name : nullptr;
     const char *runtimeName = ClassName(cid);
     if (friendlyName == nullptr)
         return runtimeName;

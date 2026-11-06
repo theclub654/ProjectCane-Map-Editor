@@ -116,7 +116,8 @@ class EditorDocumentOperations
                                                   std::int32_t destinationRootObjectIndex);
     static EditorOperationResult DeleteHierarchy(BrxDocument &document, std::int32_t rootObjectIndex);
     static EditorOperationResult ReparentObject(BrxDocument &document, std::int32_t objectIndex,
-                                                std::int32_t newParentIndex, bool preserveWorldTransform = true);
+                                                std::int32_t newParentIndex, bool preserveWorldTransform = true,
+                                                bool allowUnsupportedParent = false);
     static EditorOperationResult CreateProxySourceFromHierarchy(BrxDocument &document, std::int32_t rootObjectIndex);
     static EditorOperationResult CreateLinkedProxyInstance(BrxDocument &document, std::int32_t sourceProxyRecordIndex,
                                                            std::int32_t sourceRootIndex);

@@ -4,6 +4,8 @@
 #include <string>
 
 class BrxDocument;
+// Reuse the panel's native EOP-to-preview conversion after non-UI authoring.
+void SynchronizeSceneWorldOptions(BrxDocument &document);
 
 struct SceneWorldPreviewCallbacks
 {

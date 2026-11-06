@@ -14,12 +14,19 @@
 #include "EditorOptions.h"
 #include "EditorProject.h"
 #include "EditorTheme.h"
+#include "StudioNavigation.h"
 #include "EditorTutorialsPanel.h"
 #include "EditorWorkspace.h"
+#include "EditorMcpTools.h"
+#include "EditorMcpOperations.h"
+#include "EditorMcpFiles.h"
+#include "EditorMcpRecords.h"
 #include "ExitManagerPanel.h"
 #include "GuidedObjectStudiosPanel.h"
 #include "HubProgressionStudioPanel.h"
 #include "InspectorPanel.h"
+#include "EditorDockLayout.h"
+#include "ShapeEditing.h"
 #include "PlatformDialogs.h"
 #include "PlacementTools.h"
 #include "ProxyRuntime.h"
@@ -49,6 +56,7 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <imgui.h>
+#include "EditorMcpUi.h"
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -112,6 +120,8 @@ int RunEditorApplication()
     ApplyEditorStyle();
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigWindowsMoveFromTitleBarOnly = true;
     io.Fonts->Flags |= ImFontAtlasFlags_NoPowerOfTwoHeight;
     ImFontConfig fontConfig{};
     fontConfig.OversampleH = 3;
@@ -217,7 +227,9 @@ int RunEditorApplication()
     TnCameraDisplaySettings tnCameraDisplay;
     std::int32_t shapePreviewObject = -1;
     int selectedShapePoint = 0;
-    bool shapeGizmoWholeCurve = false;
+    bool shapeGizmoWholeCurve = true;
+    int shapePivotMode = 0;
+    std::int32_t shapePlaceAtCursor = -1;
     float shapePreviewParameter = 0.0f;
     bool shapePreviewPlaying = false;
     bool shapePreviewLoop = true;
@@ -322,6 +334,11 @@ int RunEditorApplication()
     bool advancedUi = false;
     bool showCommandPalette = false;
     int workspacePreset = 0; // 0 world, 1 scripting, 2 collision, 3 character
+    StudioWorkspace studioWorkspace = StudioWorkspace::Scene;
+    bool studioGuidance = true;
+    bool showExportGuide = false;
+    bool showGettingStarted = false;
+    bool resetDockLayout = false;
     const std::filesystem::path uiPreferencePath = "ProjectCaneMapEditor.ui";
     {
         std::ifstream preferences(uiPreferencePath);
@@ -330,6 +347,9 @@ int RunEditorApplication()
         {
             workspacePreset = (std::clamp)(workspacePreset, 0, 3);
             advancedUi = storedAdvanced != 0;
+            int storedGuidance = 1;
+            if (preferences >> storedGuidance)
+                studioGuidance = storedGuidance != 0;
         }
     }
     int editorTutorialTopic = 0;
@@ -619,7 +639,7 @@ int RunEditorApplication()
     int selectedVisibilityNode = -1;
     int selectedVisibilityZone = 0;
     int visibilityTargetObject = -1;
-    bool showVisibilityStudio = true;
+    bool showVisibilityStudio = false;
     bool paintVisibilityZone = false;
     bool isolateVisibilityZone = false;
     bool colorVisibilityZones = false;
@@ -639,7 +659,9 @@ int RunEditorApplication()
     std::int32_t activeGizmoShapeObject = -1;
     int activeGizmoShapePoint = -1;
     bool activeGizmoShapeWholeCurve = false;
+    bool shapeGizmoTransformValid = true;
     std::vector<std::array<float, 3>> gizmoStartShapePoints;
+    std::vector<std::array<float, 3>> gizmoStartShapeTangentsIn, gizmoStartShapeTangentsOut;
     std::vector<std::pair<std::int32_t, glm::mat4>> gizmoGroupStarts;
     ImVec2 gizmoStartMouse{};
     struct TransformEdit
@@ -766,6 +788,24 @@ int RunEditorApplication()
         if (objectIndex < 0 || static_cast<std::size_t>(objectIndex) >= document.EditableObjects().size())
             return;
         auto &object = document.EditableObjects()[static_cast<std::size_t>(objectIndex)];
+        if (CidDerivesFrom(object.cid, 110))
+        {
+            if (object.proxyClone || sceneRenderer.IsObjectLocked(objectIndex))
+                return;
+            auto path = std::find_if(document.EditableShapePaths().begin(), document.EditableShapePaths().end(),
+                [&](const BrxShapePathRecord &s) { return s.ownerObjectIndex == objectIndex; });
+            if (path == document.EditableShapePaths().end()) return;
+            glm::mat4 parent(1.0f);
+            if (object.parentIndex >= 0 && static_cast<std::size_t>(object.parentIndex) < document.Objects().size())
+                parent = glm::make_mat4(document.Objects()[static_cast<std::size_t>(object.parentIndex)].worldTransform);
+            const auto current = glm::make_mat4(object.worldTransform);
+            const float parentDet = glm::determinant(parent), currentDet = glm::determinant(current);
+            if (!std::isfinite(parentDet) || !std::isfinite(currentDet) ||
+                std::abs(parentDet) <= 0.000001f || std::abs(currentDet) <= 0.000001f) return;
+            if (ShapeEditing::Transform(*path, glm::inverse(parent) * target * glm::inverse(current) * parent))
+                sceneRenderer.EmitterPreview().RestartAll();
+            return; // SHAPE has no native object matrix to author.
+        }
         glm::mat4 effectiveTarget = target;
         if (CidDerivesFrom(object.cid, 126))
         {
@@ -898,7 +938,8 @@ int RunEditorApplication()
         }
         for (std::size_t candidateIndex = 0; candidateIndex < document.EditableObjects().size(); ++candidateIndex)
         {
-            if (sceneRenderer.ResolveLogicalOwner(static_cast<std::int32_t>(candidateIndex)) != objectIndex)
+            if (candidateIndex != static_cast<std::size_t>(objectIndex) &&
+                sceneRenderer.ResolveLogicalOwner(static_cast<std::int32_t>(candidateIndex)) != objectIndex)
                 continue;
             auto &candidate = document.EditableObjects()[candidateIndex];
             const glm::mat4 candidateWorld = candidateIndex == static_cast<std::size_t>(objectIndex)
@@ -913,7 +954,8 @@ int RunEditorApplication()
         // cloned object when renderer packets are rebuilt.
         for (std::size_t candidateIndex = 0; candidateIndex < document.EditableObjects().size(); ++candidateIndex)
         {
-            if (sceneRenderer.ResolveLogicalOwner(static_cast<std::int32_t>(candidateIndex)) != objectIndex)
+            if (candidateIndex != static_cast<std::size_t>(objectIndex) &&
+                sceneRenderer.ResolveLogicalOwner(static_cast<std::int32_t>(candidateIndex)) != objectIndex)
                 continue;
             auto &candidate = document.EditableObjects()[candidateIndex];
             const std::int32_t runtimeParentIndex = candidate.parentIndex;
@@ -925,6 +967,7 @@ int RunEditorApplication()
             const glm::mat4 local = glm::inverse(parentWorld) * candidateWorld;
             std::copy(glm::value_ptr(local), glm::value_ptr(local) + 16, candidate.localTransform);
         }
+        sceneRenderer.RefreshAuthoredObjectTransforms(document);
         // Frozen particles are stored in world space. Moving any hierarchy can
         // also move an emitter reference, SHAPE, or skeleton endpoint.
         if (!sceneRenderer.EmitterPreview().Playing())
@@ -1862,6 +1905,401 @@ int RunEditorApplication()
         lastPropertyFingerprint = lastPropertySnapshot.fingerprint;
         propertyTransactionActive = false;
     };
+    EditorMcpBridge mcpBridge;
+    EditorMcp::OperationPreview mcpPreview;
+    EditorMcp::FilePreview mcpFilePreview;
+    EditorMcpUi mcpUi;
+    std::string mcpUiRevision;
+    const auto mcpRevision = [&]() { return EditorMcp::Utf8Path(document.Path()) + ":" + std::to_string(history.MutationSerial()) + ":" + std::to_string(propertyFingerprint()); };
+    const auto handleMcp = [&](const EditorMcpBridge::Json &request) -> EditorMcpBridge::Json
+    {
+        using Json = EditorMcpBridge::Json;
+        const auto command = request.at("command").get<std::string>();
+        if (mcpUi.Busy() && command != "state" && command != "ui_capture") throw std::runtime_error("UI action is still processing; wait and capture its result");
+        const auto &revision = mcpRevision;
+        const auto envelope = [&](Json result) -> Json {
+            return {{"session", mcpBridge.session}, {"revision", revision()}, {"data", std::move(result)}};
+        };
+        if (command == "state") return envelope({{"open", document.IsOpen()},
+            {"path", EditorMcp::Utf8Path(document.Path())}, {"selected_index", sceneRenderer.SelectedObjectIndex()},
+            {"selected_indices", sceneRenderer.SelectedObjectIndices()},
+            {"allow_edits", mcpBridge.allowEdits}, {"cid_count", 148},
+            {"allow_file_writes", mcpBridge.allowFileWrites}, {"undo_count", history.UndoCount()}, {"redo_count", history.RedoCount()},
+            {"dirty", history.IsDirty()}, {"project_path", EditorMcp::Utf8Path(editorProjectPath)},
+            {"undo_label", history.UndoLabel()}, {"redo_label", history.RedoLabel()},
+            {"allow_ui_control", mcpUi.allowed}, {"ui_busy", mcpUi.Busy()},
+            {"read_commands", {"cids", "schema", "objects", "object", "world", "assets", "splice", "visibility", "validate", "record_catalog", "record", "operations", "file_operations", "ui_capture"}},
+            {"edit_commands", {"rename", "transform", "reparent", "create", "preview_operation", "apply_preview", "history", "preview_open", "preview_file", "write_file", "ui_input"}},
+            {"operation_catalog_command", "operations"},
+            {"limitations", "Use native operation previews for bulk edits and optional observed UI control for specialist controls. UI actions follow existing UI/overwrite behavior; OS-native dialogs need manual interaction. No building or code execution."}});
+        if (command == "operations") return envelope(EditorMcp::Operations());
+        if (command == "ui_capture")
+        {
+            return envelope(request.contains("capture_ticket") ? mcpUi.ReadCapture(request.at("capture_ticket").get<std::string>()) : mcpUi.RequestCapture());
+        }
+        if (command == "ui_input")
+        {
+            if (!mcpBridge.allowEdits || !mcpBridge.allowFileWrites) throw std::runtime_error("UI control requires document-edit and file-output permissions because it can reach Save/Delete controls");
+            if (mcpUiRevision != revision()) throw std::runtime_error("Map changed since capture; capture again");
+            mcpPreview.Clear(); mcpFilePreview.Clear();
+            return envelope(mcpUi.Input(window, request));
+        }
+        if (command == "record") return envelope(EditorMcp::InspectRecord(document, request));
+        if (command == "preview_record")
+        {
+            if (!mcpPreview.document || mcpPreview.revision != revision() || request.value("preview_token", std::string()) != mcpPreview.token ||
+                std::chrono::steady_clock::now() - mcpPreview.created > std::chrono::minutes(5)) throw std::runtime_error("Preview is missing, stale or expired");
+            if (request.at("kind") == "splice_source")
+                return envelope(EditorMcp::Inspect({{"command", "splice"}, {"index", request.at("index")}}, *mcpPreview.document, workspace));
+            return envelope(EditorMcp::InspectRecord(*mcpPreview.document, request));
+        }
+        if (command == "record_catalog") return envelope({
+            {"object", document.Objects().size()}, {"glob", document.Globs().size()}, {"globset", document.Globsets().size()},
+            {"animation", document.AnimationSegments().size()}, {"shape", document.ShapePaths().size()},
+            {"pathzone", document.PathZones().size()}, {"state_machine", document.StateMachines().size()},
+            {"reach_map", document.ReachMaps().size()}, {"keyhole", document.Keyholes().size()},
+            {"effect", document.Effects().size()}, {"volume", document.Volumes().size()}, {"camera", document.Cameras().size()},
+            {"light", document.Lights().size()}, {"checkpoint", document.Checkpoints().size()}, {"warp", document.Warps().size()},
+            {"exit", document.Exits().size()}, {"scan", document.Scans().size()}, {"bitmap", document.Bitmaps().size()},
+            {"bitmap_bytes", document.Bitmaps().size()}, {"shader", document.Shaders().size()}, {"font", document.Fonts().size()},
+            {"proxy", document.Proxies().size()}, {"glob_warp", document.GlobWarps().size()}, {"laser", document.LaserBeams().size()},
+            {"world_option", document.WorldOptions().size()}, {"world_header", document.IsOpen() ? 1 : 0},
+            {"splice_node", document.SpliceNodes().size()}, {"splice_module", document.SpliceModules().size()}});
+        if (command == "view")
+        {
+            const auto vector = [&](const char *key) {
+                const auto &a = request.at(key);
+                if (!a.is_array() || a.size() != 3) throw std::runtime_error("Expected a vec3");
+                return glm::vec3(EditorMcp::Number(a[0]), EditorMcp::Number(a[1]), EditorMcp::Number(a[2]));
+            };
+            if (request.contains("position") != request.contains("direction"))
+                throw std::runtime_error("Supply position and direction together");
+            glm::vec3 requestedPosition{}, requestedDirection{};
+            if (request.contains("position"))
+            {
+                requestedPosition = vector("position");
+                requestedDirection = vector("direction");
+                const float length = glm::length(requestedDirection);
+                if (!std::isfinite(length) || length <= 0.000001f) throw std::runtime_error("Invalid view direction");
+            }
+            const std::pair<const char *, bool *> settings[] = {
+                {"collision", &showCollision}, {"gameplay_collision", &showGameplayCollision}, {"camera_collision", &showCameraCollision},
+                {"selected_collision_only", &showSelectedObjectCollisionOnly}, {"paths", &showPaths},
+                {"effects", &showEffects}, {"gameplay_markers", &showGameplayMarkers}, {"visibility_planes", &showVisibilityPlanes},
+                {"point_markers", &showPointMarkers}, {"pathzone_navigation", &showPathZoneNavigation}
+            };
+            Json toggles = Json::object();
+            const auto changes = request.value("settings", Json::object());
+            if (!changes.is_object()) throw std::runtime_error("settings must be an object");
+            for (auto it = changes.begin(); it != changes.end(); ++it)
+            {
+                if (!it.value().is_boolean()) throw std::runtime_error("Viewport options must be boolean");
+                if (std::none_of(std::begin(settings), std::end(settings), [&](const auto &s) { return it.key() == s.first; })) throw std::runtime_error("Unknown viewport option");
+            }
+            // Validate the entire request before changing camera or toggles.
+            if (request.contains("position")) camera.SetView(requestedPosition, requestedDirection);
+            for (const auto &[label, value] : settings) { if (changes.contains(label)) *value = changes.at(label).get<bool>(); toggles[label] = *value; }
+            const auto position = camera.Position();
+            return envelope({{"position", {position.x, position.y, position.z}}, {"yaw", camera.Yaw()}, {"pitch", camera.Pitch()}, {"settings", toggles}});
+        }
+        if (command == "visibility_query")
+        {
+            if (!document.IsOpen()) throw std::runtime_error("Open a map first");
+            auto position = camera.Position();
+            if (request.contains("position"))
+            {
+                const auto &p = request.at("position");
+                if (!p.is_array() || p.size() != 3) throw std::runtime_error("Expected a vec3");
+                position = glm::vec3(EditorMcp::Number(p[0]), EditorMcp::Number(p[1]), EditorMcp::Number(p[2]));
+            }
+            const float radius = request.contains("radius") ? EditorMcp::Number(request.at("radius")) : 0.0f;
+            const auto leaf = VisibilityMap::PointNoHop(document.VisibilityNodes(), position);
+            const auto sphere = VisibilityMap::SphereOneHop(document.VisibilityNodes(), document.VisibilityOneHopMasks(), position, radius);
+            return envelope({{"position", {position.x, position.y, position.z}}, {"point_valid", leaf.valid}, {"point_mask", leaf.mask},
+                {"point_one_hop_mask", leaf.valid ? VisibilityMap::OneHop(document.VisibilityOneHopMasks(), leaf.mask) : 0u},
+                {"sphere_valid", sphere.valid}, {"sphere_mask", sphere.mask}, {"radius", radius}});
+        }
+        if (command == "preview_open")
+        {
+            if (request.value("revision", std::string()) != revision()) throw std::runtime_error("Document changed; inspect again");
+            const auto path = EditorMcp::InputPath(request);
+            const auto format = request.at("format").get<std::string>();
+            if (format != "brx" && format != "project") throw std::runtime_error("format must be brx or project");
+            mcpPreview.Clear();
+            auto candidate = std::make_unique<BrxDocument>(); std::string error;
+            const bool ok = format == "brx" ? candidate->OpenReadOnly(path, error) : EditorProject::Load(path, *candidate, error);
+            if (!ok) throw std::runtime_error(error);
+            mcpPreview.document = std::move(candidate); mcpPreview.token = EditorMcpBridge::NewSession();
+            mcpPreview.revision = revision(); mcpPreview.created = std::chrono::steady_clock::now(); mcpPreview.operation = "open_" + format;
+            mcpPreview.result = {{"path", EditorMcp::Utf8Path(path)}, {"object_count", mcpPreview.document->Objects().size()}};
+            return envelope({{"preview_token", mcpPreview.token}, {"result", mcpPreview.result}, {"replaces_current_document", true},
+                {"current_dirty", history.IsDirty()}, {"clears_history", true}, {"live_document_changed", false}});
+        }
+        if (command == "panels")
+        {
+            const std::pair<const char *, bool *> panels[] = {
+                {"assets", &showAssetBrowser}, {"textures_materials", &showTextureManager}, {"add_objects", &showCreateObjectCatalog},
+                {"placement", &showPlacementTools}, {"validation", &showValidationPanel}, {"splice_events", &showSpliceEvents},
+                {"splice_reference", &showSpliceTutorial}, {"object_operations", &showObjectOperations}, {"object_guide", &showObjectUseGuide},
+                {"tutorials", &showEditorTutorials}, {"getting_started", &showGettingStarted}, {"export_guide", &showExportGuide},
+                {"world_builder", &showWorldBuilder}, {"reference_links", &showReferenceLinks}, {"world", &showSceneWorld},
+                {"world_lights", &showSceneWorldLights}, {"camera", &showTnCameraManager}, {"dialog", &showDialogManager},
+                {"audio", &showSoundManager}, {"speakers", &showSpeakerManager}, {"characters", &showCharacterStudio},
+                {"breakables", &showBreakableStudio}, {"security", &showSecurityStudio}, {"mechanisms", &showMechanismStudio},
+                {"pickups", &showPickupStudio}, {"weapons", &showWeaponStudio}, {"water", &showWaterStudio},
+                {"shadows", &showShadowHelperStudio}, {"hub_progression", &showHubProgressionStudio},
+                {"exits", &showExitManager}, {"checkpoints", &showCheckpointManager}, {"visibility", &showVisibilityStudio}
+            };
+            const auto name = request.value("name", std::string());
+            Json result = Json::array(); bool found = name.empty();
+            for (const auto &[label, open] : panels)
+            {
+                if (name == label) { *open = request.value("open", true); found = true; }
+                result.push_back({{"name", label}, {"open", *open}});
+            }
+            if (!found) throw std::runtime_error("Unknown panel");
+            return envelope(result);
+        }
+        if (command == "file_operations") return envelope(EditorMcp::FileOperations());
+        if (command == "preview_file" || command == "write_file")
+        {
+            if (!document.IsOpen()) throw std::runtime_error("Open a map first");
+            if (request.value("revision", std::string()) != revision()) throw std::runtime_error("Document changed; preview again");
+            if (propertyTransactionActive || ImGui::IsAnyItemActive()) throw std::runtime_error("Finish the current UI edit first");
+            if (command == "preview_file")
+            {
+                mcpFilePreview.Clear();
+                const auto operation = request.at("operation").get<std::string>();
+                const auto catalog = EditorMcp::FileOperations();
+                if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &row) { return row.at("name") == operation; })) throw std::runtime_error("Unknown file operation");
+                const auto arguments = request.at("arguments");
+                const auto destination = EditorMcp::ValidateFileRequest(document, operation, arguments);
+                mcpFilePreview.operation = operation; mcpFilePreview.arguments = arguments;
+                mcpFilePreview.revision = revision(); mcpFilePreview.token = EditorMcpBridge::NewSession();
+                mcpFilePreview.created = std::chrono::steady_clock::now();
+                auto validation = EditorMcp::Inspect({{"command", "validate"}}, document, workspace);
+                return envelope({{"preview_token", mcpFilePreview.token}, {"operation", operation}, {"path", EditorMcp::Utf8Path(destination)},
+                    {"validation", validation}, {"writes_performed", false}, {"undoable", false}});
+            }
+            if (!mcpBridge.allowFileWrites) throw std::runtime_error("Enable MCP file output in the connection panel first");
+            if (mcpFilePreview.token.empty() || request.value("preview_token", std::string()) != mcpFilePreview.token ||
+                mcpFilePreview.revision != revision() || std::chrono::steady_clock::now() - mcpFilePreview.created > std::chrono::minutes(5)) throw std::runtime_error("File preview is missing, stale or expired");
+            const auto operation = mcpFilePreview.operation; const auto arguments = mcpFilePreview.arguments;
+            mcpFilePreview.Clear(); // A failed output is never silently retried.
+            const auto result = EditorMcp::WriteFile(document, operation, arguments);
+            if (operation == "save_project") { editorProjectPath = EditorMcp::PathFromUtf8(arguments.at("path").get<std::string>()); history.MarkSaved(); }
+            return envelope(result);
+        }
+        if (command == "history")
+        {
+            if (!mcpBridge.allowEdits) throw std::runtime_error("Enable MCP document editing first");
+            if (request.value("revision", std::string()) != revision()) throw std::runtime_error("Document changed; inspect again");
+            if (propertyTransactionActive || ImGui::IsAnyItemActive()) throw std::runtime_error("Finish the current UI edit first");
+            for (std::size_t i = 0; i < document.Objects().size(); ++i)
+                if (sceneRenderer.IsObjectLocked(static_cast<int>(i))) throw std::runtime_error("Unlock objects before remote undo/redo");
+            const auto action = request.at("action").get<std::string>();
+            if (action != "undo" && action != "redo") throw std::runtime_error("Expected undo or redo");
+            resetSoPreview(); asegPreviewPlaying = false; shapePreviewPlaying = false;
+            const auto label = action == "undo" ? history.Undo(applyHistory) : history.Redo(applyHistory);
+            lastPropertySnapshot = captureProperties(); lastPropertyFingerprint = lastPropertySnapshot.fingerprint;
+            propertyTransactionActive = false; mcpPreview.Clear(); mcpFilePreview.Clear();
+            sceneRenderer.SelectObject(-1);
+            return envelope({{"action", action}, {"label", label}, {"changed", !label.empty()}});
+        }
+        if (command == "discard_preview") { mcpPreview.Clear(); mcpFilePreview.Clear(); return envelope({{"discarded", true}}); }
+        if (command == "preview_operation" || command == "apply_preview")
+        {
+            const bool opening = command == "apply_preview" && mcpPreview.operation.starts_with("open_");
+            if (!document.IsOpen() && !opening) throw std::runtime_error("Open a map first");
+            if (request.value("revision", std::string()) != revision()) throw std::runtime_error("Document changed; inspect and preview again");
+            if (propertyTransactionActive || ImGui::IsAnyItemActive()) throw std::runtime_error("Finish the current UI edit first");
+            // Native operations may remap references or shared resources outside
+            // the selected subtree. Do not bypass any existing document locks.
+            for (std::size_t i = 0; i < document.Objects().size(); ++i)
+                if (sceneRenderer.IsObjectLocked(static_cast<int>(i))) throw std::runtime_error("Unlock document objects before using previewed structural/resource operations");
+            if (command == "preview_operation")
+            {
+                mcpPreview.Clear();
+                auto candidate = std::make_unique<BrxDocument>(document);
+                const auto operation = request.at("operation").get<std::string>();
+                const auto result = EditorMcp::RunOperation(*candidate, operation, request.at("arguments"));
+                const auto changes = EditorMcp::PreviewChanges(document, *candidate);
+                EditorWorkspace audit;
+                audit.Refresh(*candidate);
+                const auto diagnostics = EditorMcp::Inspect({{"command", "validate"}}, *candidate, audit);
+                const auto token = EditorMcpBridge::NewSession();
+                mcpPreview.document = std::move(candidate);
+                mcpPreview.revision = revision(); mcpPreview.token = token;
+                mcpPreview.operation = operation; mcpPreview.result = result;
+                mcpPreview.created = std::chrono::steady_clock::now();
+                return envelope({{"preview_token", token}, {"operation", operation}, {"result", result},
+                    {"before_objects", document.Objects().size()}, {"after_objects", mcpPreview.document->Objects().size()},
+                    {"changes", changes},
+                    {"validation", diagnostics}, {"live_document_changed", false},
+                    {"note", "Preview uses a separate document copy. Review validation and shared-user effects. Apply consumes this exact copy; no import is repeated."}});
+            }
+            if (!mcpBridge.allowEdits) throw std::runtime_error("Enable MCP document editing first");
+            if (!mcpPreview.document || mcpPreview.revision != revision() || request.value("preview_token", std::string()) != mcpPreview.token ||
+                std::chrono::steady_clock::now() - mcpPreview.created > std::chrono::minutes(5)) throw std::runtime_error("Preview is missing, stale or expired; preview again");
+            if (opening)
+            {
+                if (document.IsOpen() && !request.value("replace_current_document", false)) throw std::runtime_error("Opening replaces the current map and clears history; explicitly authorize replace_current_document");
+                const auto result = mcpPreview.result; const auto operation = mcpPreview.operation;
+                BrxDocument previous = document;
+                resetSoPreview(); asegPreviewActive = false; asegPreviewPlaying = false; shapePreviewPlaying = false; tnCameraPreviewRunning = false; dialogPreviewPlaying = false;
+                try
+                {
+                    document = std::move(*mcpPreview.document); mcpPreview.Clear(); mcpFilePreview.Clear();
+                    workspace.BindSource(document); sceneRenderer.ClearSelection(); sceneRenderer.ResetVisibilityCamera();
+                    sceneRenderer.EmitterPreview().ResetSession(); sceneRenderer.Upload(document);
+                }
+                catch (...) { document = std::move(previous); mcpPreview.Clear(); workspace.BindSource(document); sceneRenderer.Upload(document); throw; }
+                editorProjectPath = operation == "open_project" ? EditorMcp::PathFromUtf8(result.at("path").get<std::string>()) : EditorProject::DefaultPathFor(document);
+                history.Clear(); lastPropertySnapshot = captureProperties(); lastPropertyFingerprint = lastPropertySnapshot.fingerprint;
+                propertyTransactionActive = false; selectedVisibilityNode = document.VisibilityNodes().empty() ? -1 : 0;
+                camera.ResetToOrigin();
+                return envelope({{"result", result}, {"opened", true}, {"undoable", false}, {"history_cleared", true}});
+            }
+            auto before = captureProperties();
+            const auto result = mcpPreview.result;
+            const auto operation = mcpPreview.operation;
+            resetSoPreview();
+            asegPreviewActive = false; asegPreviewPlaying = false; shapePreviewPlaying = false; tnCameraPreviewRunning = false; dialogPreviewPlaying = false;
+            try
+            {
+                mcpPreview.document->PreserveEditorResourceIdentityFloor(document);
+                document = std::move(*mcpPreview.document);
+                mcpPreview.Clear();
+                sceneRenderer.EmitterPreview().ResetSession();
+                sceneRenderer.Upload(document);
+                workspace.Refresh(document);
+                const int selected = result.value("object_index", -1);
+                sceneRenderer.SelectObject(selected >= 0 && static_cast<std::size_t>(selected) < document.Objects().size() ? selected : -1);
+            }
+            catch (...) { mcpPreview.Clear(); applyProperties(before); throw; }
+            const bool changed = before.fingerprint != propertyFingerprint();
+            pushDocumentHistory(std::move(before), "MCP " + operation);
+            return envelope({{"result", result}, {"changed", changed}, {"undoable", changed}});
+        }
+        if (command == "select")
+        {
+            const int index = EditorMcp::Integer(request, "index");
+            if (index < 0 || static_cast<std::size_t>(index) >= document.Objects().size()) throw std::runtime_error("Invalid object index");
+            sceneRenderer.SelectObject(index);
+            if (request.value("frame", false)) sceneRenderer.FrameObject(camera, index);
+            return envelope({{"selected_index", index}});
+        }
+        if (command == "select_many")
+        {
+            const auto &values = request.at("indices");
+            if (!values.is_array() || values.size() > document.Objects().size()) throw std::runtime_error("Expected object index array");
+            std::vector<std::int32_t> indices;
+            for (const auto &value : values)
+            {
+                const int index = EditorMcp::Integer({{"index", value}}, "index");
+                if (static_cast<std::size_t>(index) >= document.Objects().size()) throw std::runtime_error("Invalid object index");
+                indices.push_back(index);
+            }
+            int primary = request.contains("primary") ? EditorMcp::Integer(request, "primary", -1) : -1;
+            if (primary < 0 && !indices.empty()) primary = indices.front();
+            if (primary >= 0 && std::find(indices.begin(), indices.end(), primary) == indices.end()) throw std::runtime_error("Primary must be in indices");
+            sceneRenderer.SelectObjects(indices, primary);
+            if (primary >= 0 && request.value("frame", false)) sceneRenderer.FrameObject(camera, primary);
+            return envelope({{"selected_index", sceneRenderer.SelectedObjectIndex()}, {"selected_indices", sceneRenderer.SelectedObjectIndices()}});
+        }
+        const bool write = command == "rename" || command == "transform" || command == "reparent" || command == "create";
+        if (!write) return envelope(EditorMcp::Inspect(request, document, workspace));
+        if (!document.IsOpen()) throw std::runtime_error("Open a map first");
+        if (!mcpBridge.allowEdits) throw std::runtime_error("Enable MCP document editing in Help > AI / MCP Connection first");
+        if (request.value("revision", std::string()) != revision()) throw std::runtime_error("Document changed; inspect again before editing");
+        // Do not merge an external edit into an active mouse/text transaction.
+        if (propertyTransactionActive || ImGui::IsAnyItemActive()) throw std::runtime_error("Finish the current UI edit first");
+        const int index = command == "create" ? -1 : EditorMcp::Integer(request, "index");
+        if (command != "create" && (index < 0 || static_cast<std::size_t>(index) >= document.Objects().size())) throw std::runtime_error("Invalid object index");
+        if (command != "create" && (document.Objects()[index].proxyClone || sceneRenderer.IsObjectLocked(index))) throw std::runtime_error("Object is locked or a resolved PROXY clone");
+        if (command == "rename" && request.at("name").get<std::string>().size() > 256) throw std::runtime_error("Name exceeds 256 bytes");
+        if (command == "create")
+        {
+            const int cid = EditorMcp::Integer(request, "cid", 0, 147);
+            if (cid < 0 || cid >= 148) throw std::runtime_error("Invalid CID");
+        }
+        glm::mat4 target(1.0f);
+        if (command == "transform" || command == "create")
+        {
+            const auto values = request.at("matrix").get<std::vector<float>>();
+            if (values.size() != 16 || !std::all_of(values.begin(), values.end(), [](float v) { return std::isfinite(v); })) throw std::runtime_error("Expected 16 finite matrix values");
+            target = glm::make_mat4(values.data());
+            const float determinant = glm::determinant(target);
+            if (values[3] != 0 || values[7] != 0 || values[11] != 0 || values[15] != 1 || !std::isfinite(determinant) || std::abs(determinant) <= 0.000001f) throw std::runtime_error("Expected a finite, invertible affine world matrix");
+        }
+        if (command == "transform")
+        {
+            const auto &object = document.Objects()[index];
+            if (!object.hasAloPayload && !CidDerivesFrom(object.cid, 110) && !CidDerivesFrom(object.cid, 126))
+                throw std::runtime_error("This CID has no supported native object transform; use its specialized editor");
+            const float determinant = glm::determinant(glm::make_mat4(object.worldTransform));
+            if (!std::isfinite(determinant) || std::abs(determinant) < 0.000001f)
+                throw std::runtime_error("Current object transform is singular or invalid");
+            if (object.parentIndex >= 0)
+            {
+                if (static_cast<std::size_t>(object.parentIndex) >= document.Objects().size()) throw std::runtime_error("Invalid current parent");
+                const float parentDet = glm::determinant(glm::make_mat4(document.Objects()[object.parentIndex].worldTransform));
+                if (!std::isfinite(parentDet) || std::abs(parentDet) <= 0.000001f) throw std::runtime_error("Parent transform is singular or invalid");
+            }
+        }
+        if (command == "transform" || command == "reparent")
+        {
+            // Hierarchy operations affect descendants too. Reject instead of
+            // moving a locked descendant through an unlocked parent.
+            for (std::size_t i = 0; i < document.Objects().size(); ++i)
+            {
+                int parent = document.Objects()[i].parentIndex;
+                for (std::size_t depth = 0; parent >= 0 && depth < document.Objects().size(); ++depth)
+                {
+                    if (static_cast<std::size_t>(parent) >= document.Objects().size()) break;
+                    if (parent == index)
+                    {
+                        if (sceneRenderer.IsObjectLocked(static_cast<std::int32_t>(i))) throw std::runtime_error("A descendant is locked");
+                        break;
+                    }
+                    parent = document.Objects()[parent].parentIndex;
+                }
+            }
+        }
+        if (command == "reparent" || command == "create")
+        {
+            const int parent = EditorMcp::Integer(request, "parent_index", -1);
+            if (parent < -1 || (parent >= 0 && (static_cast<std::size_t>(parent) >= document.Objects().size() || sceneRenderer.IsObjectLocked(parent) || document.Objects()[parent].proxyClone))) throw std::runtime_error("Invalid or locked parent");
+        }
+        auto before = captureProperties();
+        int selected = index;
+        try
+        {
+            if (command == "rename") document.EditableObjects()[index].editorName = request.at("name").get<std::string>();
+            else if (command == "transform") applyTransform(index, target);
+            else
+            {
+                const auto result = command == "create"
+                    ? CreateObjectFromCatalog(document, request.at("cid").get<std::int16_t>(), EditorMcp::Integer(request, "parent_index", -1), glm::value_ptr(target))
+                    : EditorDocumentOperations::ReparentObject(document, index, EditorMcp::Integer(request, "parent_index", -1), true, request.value("allow_unsupported_parent", false));
+                if (!result.succeeded) throw std::runtime_error(result.message);
+                selected = result.primaryObjectIndex;
+            }
+            workspace.Refresh(document);
+            sceneRenderer.Upload(document);
+            sceneRenderer.SelectObject(selected);
+        }
+        catch (...)
+        {
+            applyProperties(before);
+            workspace.Refresh(document);
+            sceneRenderer.Upload(document);
+            throw;
+        }
+        const bool changed = before.fingerprint != propertyFingerprint();
+        pushDocumentHistory(std::move(before), "MCP " + command);
+        return envelope({{"object_index", selected}, {"changed", changed}, {"undoable", changed}});
+    };
     auto previousTime = std::chrono::steady_clock::now();
     struct EditorFramePerformance
     {
@@ -1899,6 +2337,7 @@ int RunEditorApplication()
 
     while (!glfwWindowShouldClose(window))
     {
+        bool shapePlacementChangedThisFrame = false;
         currentFramePerformance = {};
         const double editorFrameStart = glfwGetTime();
         glfwPollEvents();
@@ -1949,7 +2388,45 @@ int RunEditorApplication()
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
+        mcpUi.BeginFrame();
+        if (mcpPreview.document && std::chrono::steady_clock::now() - mcpPreview.created > std::chrono::minutes(5)) mcpPreview.Clear();
+        mcpBridge.Poll(handleMcp);
+        if (mcpUi.PendingInput() && (!mcpBridge.enabled || !mcpBridge.allowEdits || !mcpBridge.allowFileWrites || !mcpUi.allowed)) mcpUi.Clear();
+        mcpUi.Pump(window);
         ImGui::NewFrame();
+        if (mcpBridge.showPanel)
+        {
+            ImGui::SetNextWindowSize(ImVec2(560, 300), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("AI / MCP Connection", &mcpBridge.showPanel))
+            {
+                ImGui::TextWrapped("Connect an MCP client to inspect this editor and its CID schemas. Your MCP client provides the AI model. This connection is local to your computer.");
+                bool enabled = mcpBridge.enabled;
+                if (ImGui::Checkbox("Enable local MCP connection", &enabled))
+                {
+                    mcpPreview.Clear(); mcpFilePreview.Clear();
+                    mcpUi.Clear();
+                    if (enabled) mcpBridge.Start(); else mcpBridge.Stop();
+                }
+                if (mcpBridge.enabled)
+                {
+                    ImGui::Checkbox("Allow undoable document edits", &mcpBridge.allowEdits);
+                    ImGui::Checkbox("Allow MCP file output", &mcpBridge.allowFileWrites);
+                    bool uiControl = mcpUi.allowed;
+                    if (ImGui::Checkbox("Allow MCP to operate the existing UI", &uiControl))
+                    {
+                        mcpUi.Clear(); mcpUi.allowed = uiControl;
+                    }
+                    ImGui::TextWrapped("UI control can use Save and Delete and follows native dialogs/overwrite behavior. It requires both permissions above. Use structured preview operations for bulk edits; keep the editor untouched during UI control.");
+                    ImGui::TextWrapped("%s", mcpUi.activity.c_str());
+                    ImGui::TextWrapped("Bridge folder: %s", EditorMcp::Utf8Path(mcpBridge.directory).c_str());
+                    if (ImGui::Button("Copy bridge folder")) ImGui::SetClipboardText(EditorMcp::Utf8Path(mcpBridge.directory).c_str());
+                    ImGui::TextWrapped("Configure the companion using MCP.md in the source repository. Multiple open editors require an explicit bridge folder.");
+                }
+                ImGui::Separator();
+                ImGui::TextWrapped("%s", mcpBridge.lastActivity.c_str());
+            }
+            ImGui::End();
+        }
         currentFramePerformance.preFrameMs = (glfwGetTime() - editorFrameStart) * 1000.0;
         const double editorUiStart = glfwGetTime();
 
@@ -2012,6 +2489,11 @@ int RunEditorApplication()
                     pathZoneDrawMode = false;
                     pathZoneDraft.clear();
                     status = "Cancelled PATHZONE drawing.";
+                }
+                else if (shapePlaceAtCursor >= 0)
+                {
+                    shapePlaceAtCursor = -1;
+                    status = "Cancelled SHAPE cursor placement.";
                 }
                 else if (shapeDrawMode)
                 {
@@ -2256,45 +2738,88 @@ int RunEditorApplication()
         int framebufferWidth = 0;
         int framebufferHeight = 0;
         glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
-        const float menuHeight = 24.0f;
+        const float mainMenuHeight = ImGui::GetFrameHeight();
+        const float menuHeight = mainMenuHeight;
         const float statusHeight = 24.0f;
-        const float leftWidth = workspacePreset == 1 ? 320.0f : (workspacePreset == 2 ? 300.0f : 280.0f);
-        const float rightWidth = workspacePreset == 2 ? 430.0f : (workspacePreset == 3 ? 390.0f : 360.0f);
+        const float leftWidth = (std::min)(framebufferWidth * 0.22f, workspacePreset == 1 ? 320.0f : 280.0f);
+        const float rightWidth = (std::min)(framebufferWidth * 0.30f, workspacePreset == 2 ? 430.0f : 360.0f);
 
+        static std::uint64_t analyzedExportRevision = (std::numeric_limits<std::uint64_t>::max)();
+        static BrxCompilePlan compilePlan;
+        const auto openStudioLevel = [&]()
+        {
+            const auto path = ChooseBrxFile(window);
+            if (!path.empty())
+            {
+                resetSoPreview();
+                std::string error;
+                if (document.OpenReadOnly(path, error))
+                {
+                    workspace.BindSource(document);
+                    editorProjectPath = EditorProject::DefaultPathFor(document);
+                    sceneRenderer.ResetVisibilityCamera();
+                    sceneRenderer.EmitterPreview().ResetSession();
+                    sceneRenderer.Upload(document);
+                    history.Clear();
+                    lastPropertySnapshot = captureProperties();
+                    lastPropertyFingerprint = lastPropertySnapshot.fingerprint;
+                    propertyTransactionActive = false;
+                    selectedVisibilityNode = document.VisibilityNodes().empty() ? -1 : 0;
+                    camera.ResetToOrigin();
+                    status = "Opened " + path.filename().string() + " in read-only mode.";
+                }
+                else
+                {
+                    if (!document.IsOpen())
+                        sceneRenderer.Clear();
+                    status = "Open failed: " + error;
+                }
+            }
+        };
+        const auto saveStudioProject = [&]()
+        {
+            if (editorProjectPath.empty())
+                editorProjectPath = EditorProject::DefaultPathFor(document);
+            std::string error;
+            if (EditorProject::Save(editorProjectPath, document, error))
+            {
+                history.MarkSaved();
+                status = "Saved editor project " + editorProjectPath.filename().string() + ".";
+            }
+            else
+                status = "Save failed: " + error;
+        };
+        const auto exportStudioLevel = [&]()
+        {
+            if (analyzedExportRevision != workspace.Revision())
+            {
+                compilePlan = workspace.Compiler().Analyze(document, workspace.Validation());
+                analyzedExportRevision = workspace.Revision();
+            }
+            if (!compilePlan.writerAvailable)
+                status = compilePlan.blockers.empty() ? "Export is blocked by rebuild validation."
+                                                      : "Export blocked: " + compilePlan.blockers.front();
+            else
+            {
+                const auto destination = ChooseBrxSaveFile(window, document.Path());
+                if (!destination.empty())
+                {
+                    std::string error;
+                    if (workspace.Compiler().WriteRebuiltPayload(document, workspace.Validation(), destination,
+                                                                 error))
+                        status =
+                            "Exported and reopened rebuilt retail payload to " + destination.string() + ".";
+                    else
+                        status = "Edited PCBRX rebuild failed: " + error;
+                }
+            }
+        };
         if (ImGui::BeginMainMenuBar())
         {
             if (ImGui::BeginMenu("File"))
             {
                 if (ImGui::MenuItem("Open PCBRX...", "Ctrl+O"))
-                {
-                    const auto path = ChooseBrxFile(window);
-                    if (!path.empty())
-                    {
-                        resetSoPreview();
-                        std::string error;
-                        if (document.OpenReadOnly(path, error))
-                        {
-                            workspace.BindSource(document);
-                            editorProjectPath = EditorProject::DefaultPathFor(document);
-                            sceneRenderer.ResetVisibilityCamera();
-                            sceneRenderer.EmitterPreview().ResetSession();
-                            sceneRenderer.Upload(document);
-                            history.Clear();
-                            lastPropertySnapshot = captureProperties();
-                            lastPropertyFingerprint = lastPropertySnapshot.fingerprint;
-                            propertyTransactionActive = false;
-                            selectedVisibilityNode = document.VisibilityNodes().empty() ? -1 : 0;
-                            camera.ResetToOrigin();
-                            status = "Opened " + path.filename().string() + " in read-only mode.";
-                        }
-                        else
-                        {
-                            if (!document.IsOpen())
-                                sceneRenderer.Clear();
-                            status = "Open failed: " + error;
-                        }
-                    }
-                }
+                    openStudioLevel();
                 if (ImGui::MenuItem("Load Editor Project..."))
                 {
                     const auto selectedProject = ChooseEditorProjectFile(window);
@@ -2321,18 +2846,7 @@ int RunEditorApplication()
                     }
                 }
                 if (ImGui::MenuItem("Save Editor Project", "Ctrl+S", false, document.IsOpen()))
-                {
-                    if (editorProjectPath.empty())
-                        editorProjectPath = EditorProject::DefaultPathFor(document);
-                    std::string error;
-                    if (EditorProject::Save(editorProjectPath, document, error))
-                    {
-                        history.MarkSaved();
-                        status = "Saved editor project " + editorProjectPath.filename().string() + ".";
-                    }
-                    else
-                        status = "Save failed: " + error;
-                }
+                    saveStudioProject();
                 ImGui::SeparatorText("Reusable hierarchies");
                 const std::int32_t hierarchySelection = sceneRenderer.SelectedObjectIndex();
                 if (ImGui::MenuItem("Export selected hierarchy...", nullptr, false, hierarchySelection >= 0))
@@ -2484,33 +2998,8 @@ int RunEditorApplication()
                 // A full rebuild analysis walks every object, option, splice,
                 // texture, GLOB and collision record. Never run it merely to
                 // paint an open menu; analyze once when export is requested.
-                static std::uint64_t analyzedExportRevision = (std::numeric_limits<std::uint64_t>::max)();
-                static BrxCompilePlan compilePlan;
                 if (ImGui::MenuItem("Export rebuilt edited PCBRX...", nullptr, false, document.IsOpen()))
-                {
-                    if (analyzedExportRevision != workspace.Revision())
-                    {
-                        compilePlan = workspace.Compiler().Analyze(document, workspace.Validation());
-                        analyzedExportRevision = workspace.Revision();
-                    }
-                    if (!compilePlan.writerAvailable)
-                        status = compilePlan.blockers.empty() ? "Export is blocked by rebuild validation."
-                                                              : "Export blocked: " + compilePlan.blockers.front();
-                    else
-                    {
-                        const auto destination = ChooseBrxSaveFile(window, document.Path());
-                        if (!destination.empty())
-                        {
-                            std::string error;
-                            if (workspace.Compiler().WriteRebuiltPayload(document, workspace.Validation(), destination,
-                                                                         error))
-                                status =
-                                    "Exported and reopened rebuilt retail payload to " + destination.string() + ".";
-                            else
-                                status = "Edited PCBRX rebuild failed: " + error;
-                        }
-                    }
-                }
+                    exportStudioLevel();
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 {
                     ImGui::BeginTooltip();
@@ -2551,14 +3040,18 @@ int RunEditorApplication()
                 const std::int32_t selected = sceneRenderer.SelectedObjectIndex();
                 if (ImGui::BeginMenu("Create object", document.IsOpen()))
                 {
+                    // Creation position is independent of parenting. Use a world-space
+                    // anchor so CreateObject can convert it into the native parent space.
+                    const glm::mat4 cameraWorld = glm::inverse(camera.ViewMatrix());
+                    glm::mat4 newObjectPlacement(1.0f);
+                    newObjectPlacement[3] = glm::vec4(
+                        camera.Position() - glm::normalize(glm::vec3(cameraWorld[2])) * 500.0f, 1.0f);
                     if (ImGui::MenuItem("All object types..."))
                         showCreateObjectCatalog = true;
                     ImGui::SeparatorText("Quick and specialized creation");
                     const auto create = [&](const std::int16_t cid)
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         const auto result = EditorDocumentOperations::CreateObject(document, cid, selected, transform);
                         status = result.message;
                         if (result.succeeded)
@@ -2579,7 +3072,7 @@ int RunEditorApplication()
                         create(48);
                     if (ImGui::MenuItem("LASEN with starter beam"))
                     {
-                        const auto result = EditorDocumentOperations::CreateLasen(document, selected, nullptr);
+                        const auto result = EditorDocumentOperations::CreateLasen(document, selected, glm::value_ptr(newObjectPlacement));
                         status = result.message;
                         if (result.succeeded)
                         {
@@ -2590,7 +3083,7 @@ int RunEditorApplication()
                     }
                     if (ImGui::MenuItem("CAMSEN with detection sphere"))
                     {
-                        const auto result = EditorDocumentOperations::CreateCamsen(document, selected, nullptr);
+                        const auto result = EditorDocumentOperations::CreateCamsen(document, selected, glm::value_ptr(newObjectPlacement));
                         status = result.message;
                         if (result.succeeded)
                         {
@@ -2910,9 +3403,7 @@ int RunEditorApplication()
                     }
                     if (ImGui::MenuItem("XFM transform marker"))
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         const auto result = EditorDocumentOperations::CreateXfm(document, selected, transform);
                         status = result.message;
                         if (result.succeeded)
@@ -3175,13 +3666,10 @@ int RunEditorApplication()
                             // place quick paths somewhere visible instead of silently
                             // creating an unparented path at the map origin.
                             glm::mat4 placement(1.0f);
-                            if (selected >= 0 && static_cast<std::size_t>(selected) < document.Objects().size())
-                                placement = sceneRenderer.ResolvedObjectTransform(selected);
-                            else
                             {
                                 const glm::mat4 cameraWorld = glm::inverse(camera.ViewMatrix());
                                 const glm::vec3 forward = glm::normalize(-glm::vec3(cameraWorld[2]));
-                                placement[0] = glm::vec4(glm::normalize(glm::vec3(cameraWorld[0])), 0.0f);
+                                placement = cameraWorld;
                                 placement[3] = glm::vec4(camera.Position() + forward * 500.0f, 1.0f);
                             }
                             const auto result =
@@ -3467,9 +3955,7 @@ int RunEditorApplication()
                     }
                     if (ImGui::MenuItem("WATER volume"))
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         const auto result = EditorDocumentOperations::CreateWater(document, selected, transform);
                         status = result.message;
                         if (result.succeeded)
@@ -3588,9 +4074,7 @@ int RunEditorApplication()
                     {
                         const auto createButton = [&](const EditorDocumentOperations::ButtonPreset preset)
                         {
-                            const float *transform =
-                                selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                              : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                             const auto result =
                                 EditorDocumentOperations::CreateButton(document, preset, selected, transform);
                             status = result.message;
@@ -3616,9 +4100,7 @@ int RunEditorApplication()
                     }
                     if (ImGui::MenuItem("Trigger Volume (VOL)"))
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         const auto result = EditorDocumentOperations::CreateVolume(document, selected, transform);
                         status = result.message;
                         if (result.succeeded)
@@ -3631,9 +4113,7 @@ int RunEditorApplication()
                     }
                     if (ImGui::MenuItem("Checkpoint (CHKPNT)"))
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         const auto result = EditorDocumentOperations::CreateCheckpoint(document, selected, transform);
                         status = result.message;
                         if (result.succeeded)
@@ -3646,9 +4126,7 @@ int RunEditorApplication()
                     }
                     if (ImGui::MenuItem("TZP hazard surface"))
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         const auto result = EditorDocumentOperations::CreateTzp(document, selected, transform);
                         status = result.message;
                         if (result.succeeded)
@@ -3661,9 +4139,7 @@ int RunEditorApplication()
                     }
                     if (ImGui::MenuItem("VOLZP damage volume"))
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         const auto result = EditorDocumentOperations::CreateVolzp(document, selected, transform);
                         status = result.message;
                         if (result.succeeded)
@@ -3676,9 +4152,7 @@ int RunEditorApplication()
                     }
                     if (ImGui::MenuItem("VOLBTN trigger button"))
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         const auto result = EditorDocumentOperations::CreateVolbtn(document, selected, transform);
                         status = result.message;
                         if (result.succeeded)
@@ -3699,9 +4173,7 @@ int RunEditorApplication()
                     }
                     if (ImGui::MenuItem("JLOVOL cannon landing trigger"))
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         const auto result = EditorDocumentOperations::CreateJlovol(document, selected, transform);
                         status = result.message;
                         if (result.succeeded)
@@ -3714,9 +4186,7 @@ int RunEditorApplication()
                     }
                     if (ImGui::MenuItem("BARRIER collision gate"))
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         const auto result = EditorDocumentOperations::CreateBarrier(document, selected, transform);
                         status = result.message;
                         if (result.succeeded)
@@ -3729,9 +4199,7 @@ int RunEditorApplication()
                     }
                     if (ImGui::MenuItem("DIALOG conversation"))
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         // Conversations are authored as independent script roots; their own
                         // child ASEGs can then be attached for explicit lipsync.
                         const auto result = EditorDocumentOperations::CreateDialog(document, -1, transform);
@@ -3746,9 +4214,7 @@ int RunEditorApplication()
                     ImGui::Separator();
                     if (ImGui::MenuItem("WARP destination"))
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         const std::int32_t parent =
                             selected >= 0 && document.Objects()[static_cast<std::size_t>(selected)].hasAloPayload
                                 ? selected
@@ -3778,9 +4244,7 @@ int RunEditorApplication()
                     ImGui::Separator();
                     const auto createTn = [&](const EditorDocumentOperations::TnPreset preset)
                     {
-                        const float *transform =
-                            selected >= 0 ? document.Objects()[static_cast<std::size_t>(selected)].worldTransform
-                                          : nullptr;
+                        const float *transform = glm::value_ptr(newObjectPlacement);
                         const std::int32_t parent =
                             selected >= 0 && document.Objects()[static_cast<std::size_t>(selected)].hasAloPayload
                                 ? selected
@@ -3870,6 +4334,12 @@ int RunEditorApplication()
             }
             if (ImGui::BeginMenu("View"))
             {
+                if (ImGui::MenuItem("Reset Layout"))
+                {
+                    resetDockLayout = true;
+                    status = "Restored Scene / Viewport / Inspector layout.";
+                }
+                ImGui::Separator();
                 if (ImGui::BeginMenu("Workspace"))
                 {
                     const auto chooseWorkspace = [&](const char *label, const int preset)
@@ -3877,6 +4347,10 @@ int RunEditorApplication()
                         if (!ImGui::MenuItem(label, nullptr, workspacePreset == preset))
                             return;
                         workspacePreset = preset;
+                        studioWorkspace = preset == 1 ? StudioWorkspace::Splice
+                                          : preset == 2 ? StudioWorkspace::Collision
+                                          : preset == 3 ? StudioWorkspace::Animation
+                                                        : StudioWorkspace::Scene;
                         showWorldBuilder = false;
                         showSpliceEvents = false;
                         showValidationPanel = false;
@@ -3993,6 +4467,9 @@ int RunEditorApplication()
             }
             if (ImGui::BeginMenu("Help"))
             {
+                ImGui::MenuItem("AI / MCP Connection", nullptr, &mcpBridge.showPanel);
+                ImGui::MenuItem("Getting Started", nullptr, &showGettingStarted);
+                ImGui::Separator();
                 if (ImGui::BeginMenu("Editor Tutorials"))
                 {
                     static constexpr const char *tutorialNames[] = {"Map Editor Basics",
@@ -4074,6 +4551,117 @@ int RunEditorApplication()
             else
                 ImGui::TextDisabled("No level open");
             ImGui::EndMainMenuBar();
+        }
+
+        DrawEditorDockLayout(menuHeight, statusHeight, leftWidth, rightWidth, resetDockLayout);
+
+        ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Appearing);
+        if (ImGui::BeginPopupModal("Export playable level", &showExportGuide, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ImGui::TextWrapped("Save your editor project to keep working. Export a rebuilt PCBRX to test your changes in the game.");
+            ImGui::SeparatorText("1. Review");
+            ImGui::TextWrapped("Review the level's issues first. The existing rebuild checks also run when you export.");
+            if (ImGui::Button("Open level issues"))
+            {
+                showValidationPanel = true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SeparatorText("2. Export");
+            ImGui::TextWrapped("Choose a separate output file. Keep a backup of the original game level before replacing it.");
+            ImGui::BeginDisabled(!document.IsOpen());
+            if (ImGui::Button("Export rebuilt PCBRX..."))
+            {
+                exportStudioLevel();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            ImGui::SeparatorText("3. Test in game");
+            ImGui::TextWrapped("Install the exported file at the level path your game loads. Saving an editor project or exporting a GLB does not update the playable level. Check both visuals and gameplay after loading it.");
+            ImGui::Separator();
+            if (ImGui::Button("Back to editor"))
+                ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        if (showGettingStarted)
+        {
+            ImGui::SetNextWindowSize(ImVec2(760.0f, 650.0f), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Getting Started", &showGettingStarted))
+            {
+                static int gettingStartedStep = 0;
+                static constexpr const char *steps[] = {
+                    "Open a level", "Understand the screen", "Select the right thing",
+                    "Make one small edit", "Check the result", "Save and export", "Test in game"};
+                static constexpr const char *explanations[] = {
+                    "Start with a copy of a working ProjectCane PCBRX level. PCBRX is the playable level format this editor opens. Keep the original somewhere safe so you can compare results or start again. Opening a level does not change the file on disk.",
+                    "The scene hierarchy lists the objects in your level. The viewport is the 3D view. The Inspector shows settings for your selection. Use the top menus to open tools such as Asset Browser and Level Validation. You do not need to use every tool to make a small edit.",
+                    "A visible model is not always the whole object. One assembly can have separate model parts, collision surfaces, interaction markers and scripts. Select an object in the hierarchy and read its Inspector. If a Selection path is shown, use its Inspect buttons to distinguish the visual part from its gameplay owner. CID means object type; OID is the identifier that game references use. Leave these identities unchanged for your first edit.",
+                    "For your first experiment, change the position of one simple existing prop. In Edit, choose Move (W), Rotate (E) or Scale (R), then use the viewport gizmo or Inspector transform controls. Inspect which object or model part is selected before dragging. Use Edit > Undo if the result is wrong. A model-only edit does not establish that a gameplay marker or separately owned collision moved with it.",
+                    "Look at your edit from more than one angle. Show collision and compare its position with the visible model. For a gameplay object, expand Object setup in the Inspector: it explains dependencies, but does not validate them automatically. Open Level Validation and read the reported issues. A clean report cannot prove every interaction works in game.",
+                    "Save Editor Project preserves your editing session for later. Export rebuilt edited PCBRX creates the playable level output. Export Map (GLB) creates a 3D model export, not a playable level. Use a separate output filename and keep your original backup. Saving a project alone does not install your edit into the game.",
+                    "Place the exported PCBRX at the exact level path your ProjectCane installation loads, keeping a backup of the original. An export with a different filename is not automatically loaded by the game. Reload the level and check the edited prop, its collision and any interaction. For gameplay changes, also test death, checkpoint reset and level reload. Compare against the original if behavior is unexpected."};
+                ImGui::TextWrapped("Your first level edit, one step at a time. Reading a step does not run an operation or mark your map as ready.");
+                ImGui::Separator();
+                for (int step = 0; step < static_cast<int>(std::size(steps)); ++step)
+                {
+                    ImGui::PushID(step);
+                    const std::string label = std::to_string(step + 1) + ". " + steps[step];
+                    if (ImGui::Selectable(label.c_str(), gettingStartedStep == step))
+                        gettingStartedStep = step;
+                    ImGui::PopID();
+                }
+                ImGui::SeparatorText(steps[gettingStartedStep]);
+                ImGui::TextWrapped("%s", explanations[gettingStartedStep]);
+                ImGui::Spacing();
+                switch (gettingStartedStep)
+                {
+                case 0:
+                    if (ImGui::Button("Open PCBRX..."))
+                        openStudioLevel();
+                    break;
+                case 1:
+                    ImGui::TextWrapped("Tip: select an object, then press F while the viewport has keyboard focus to frame it. Specialist tools can wait until you need them.");
+                    break;
+                case 2:
+                case 3:
+                    if (ImGui::Button("Open CID Object Guide"))
+                        showObjectUseGuide = true;
+                    ImGui::TextWrapped("Adding something new? Use the Create Object Catalog. Create preset uses a starter; Create record still needs setup. Neither label guarantees a complete game-ready assembly.");
+                    break;
+                case 4:
+                    ImGui::Checkbox("Show collision in viewport", &showCollision);
+                    ImGui::BeginDisabled(!document.IsOpen());
+                    if (ImGui::Button("Open Level Validation"))
+                        showValidationPanel = true;
+                    ImGui::EndDisabled();
+                    ImGui::TextWrapped("Missing paths or markers after reopening? Check the relevant helper display settings as well as validation; an invisible helper is not proof that its data was lost.");
+                    break;
+                case 5:
+                    ImGui::BeginDisabled(!document.IsOpen());
+                    if (ImGui::Button("Save Editor Project..."))
+                        saveStudioProject();
+                    ImGui::EndDisabled();
+                    ImGui::TextWrapped("Use File > Export rebuilt edited PCBRX to create the playable level output.");
+                    break;
+                case 6:
+                    ImGui::TextWrapped("If an edit is missing: confirm the game loaded your exported file, reopen that output in the editor, then check object ownership, collision and runtime animation/state behavior. Do not assume all parts share one transform.");
+                    break;
+                }
+                ImGui::Separator();
+                ImGui::BeginDisabled(gettingStartedStep == 0);
+                if (ImGui::Button("Previous"))
+                    --gettingStartedStep;
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                ImGui::BeginDisabled(gettingStartedStep == static_cast<int>(std::size(steps)) - 1);
+                if (ImGui::Button("Next"))
+                    ++gettingStartedStep;
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (ImGui::Button("More editor tutorials"))
+                    showEditorTutorials = true;
+            }
+            ImGui::End();
         }
 
         if (showCommandPalette)
@@ -4285,7 +4873,7 @@ int RunEditorApplication()
         DrawAssetBrowserPanel(showAssetBrowser, document, sceneRenderer, workspace.Assets(), workspace.Prefabs(),
                               workspace, window, camera, gizmoMode, status);
         DrawCreateObjectCatalogPanel(showCreateObjectCatalog, document, workspace, sceneRenderer,
-                                     sceneRenderer.SelectedObjectIndex(), status);
+                                     sceneRenderer.SelectedObjectIndex(), status, camera);
         DrawObjectUseGuidePanel(showObjectUseGuide, workspace, showCreateObjectCatalog, showObjectOperations);
         DrawPlacementToolsPanel(showPlacementTools, document, sceneRenderer, gizmoMode, status);
         DrawValidationPanel(showValidationPanel, document, workspace, sceneRenderer, camera, status);
@@ -4772,8 +5360,7 @@ int RunEditorApplication()
             ImGui::End();
         }
 
-        const ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-                                            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
+        const ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoCollapse;
 
         currentFramePerformance.otherUiMs = (glfwGetTime() - editorUiStart) * 1000.0;
         const double hierarchyStart = glfwGetTime();
@@ -4781,7 +5368,7 @@ int RunEditorApplication()
         DrawSceneHierarchyPanel(ImVec2(0.0f, menuHeight),
                                 ImVec2(leftWidth, framebufferHeight - menuHeight - statusHeight), panelFlags, document,
                                 workspace.Scene(), sceneRenderer, objectFilter, lastOutlinerObject, status,
-                                hierarchyAction);
+                                hierarchyAction, true);
         // Apply structural changes only after the panel has released its row
         // references. Refresh the resolved scene before the inspector draws.
         if (hierarchyAction.kind != SceneHierarchyAction::Kind::None && document.IsOpen())
@@ -4831,7 +5418,7 @@ int RunEditorApplication()
                         break;
                     }
                     PropertySnapshot before = captureProperties();
-                    const auto result = EditorDocumentOperations::ReparentObject(document, objectIndex, parent, true);
+                    const auto result = EditorDocumentOperations::ReparentObject(document, objectIndex, parent, true, true);
                     status = result.message;
                     if (result.succeeded)
                         finishHierarchyEdit(std::move(before), objectIndex, "move hierarchy");
@@ -4901,9 +5488,45 @@ int RunEditorApplication()
         currentFramePerformance.hierarchyMs = (glfwGetTime() - hierarchyStart) * 1000.0;
 
         const double inspectorStart = glfwGetTime();
-        ImGui::SetNextWindowPos(ImVec2(framebufferWidth - rightWidth, menuHeight));
-        ImGui::SetNextWindowSize(ImVec2(rightWidth, framebufferHeight - menuHeight - statusHeight));
-        ImGui::Begin("Inspector", nullptr, panelFlags);
+        if (ImGui::Begin("Inspector", nullptr, panelFlags))
+        {
+        if (document.IsOpen())
+        {
+            const auto selectionIndex = sceneRenderer.SelectedObjectIndex();
+            if (selectionIndex >= 0 && static_cast<std::size_t>(selectionIndex) < document.Objects().size())
+            {
+                ImGui::TextWrapped("%s", document.ObjectEditorLabel(selectionIndex).c_str());
+                ImGui::TextDisabled("%s", BrxDocument::EditorClassName(
+                                              document.Objects()[static_cast<std::size_t>(selectionIndex)].cid).c_str());
+                const bool modelOnly = sceneRenderer.HasGlobSelection();
+                ImGui::TextColored(ImVec4(0.25f, 0.80f, 0.85f, 1.0f), "Editing: %s",
+                                   sceneRenderer.HasSubglobSelection() ? "model part" : modelOnly ? "model" : "object");
+                if (modelOnly)
+                {
+                    ImGui::TextWrapped("Model selection does not select a new gameplay object or independent collision.");
+                    if (ImGui::SmallButton("Select owning object"))
+                        sceneRenderer.SelectObject(sceneRenderer.ResolveLogicalOwner(selectionIndex));
+                }
+                else
+                {
+                    if (ImGui::SmallButton("Transform"))
+                        inspectorPage = InspectorPage::Transform;
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Overview"))
+                        inspectorPage = InspectorPage::General;
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Links"))
+                        inspectorPage = InspectorPage::Relationships;
+                }
+                ImGui::Separator();
+            }
+            else
+            {
+                ImGui::TextWrapped("Select an object in Scene or click it in the viewport to inspect it.");
+                ImGui::TextWrapped("Use Ctrl-click for multiple selections and F to bring the selection into view.");
+                ImGui::Separator();
+            }
+        }
         if (document.IsOpen())
         {
             const std::int32_t selectedObjectIndex = sceneRenderer.SelectedObjectIndex();
@@ -7237,6 +7860,56 @@ int RunEditorApplication()
                 const auto inspectorModel =
                     BuildInspectorPanelModel(document, workspace.ObjectTypes(), sceneRenderer, selectedObjectIndex);
                 const auto &propertySections = inspectorModel.propertySections;
+                if (inspectorPage == InspectorPage::Transform && CidDerivesFrom(object.cid, 110))
+                    inspectorPage = InspectorPage::Specialized;
+                DrawObjectSetupCard(object.cid);
+                if (DrawObjectRelationships(document, workspace.ObjectTypes(), sceneRenderer, selectedObjectIndex))
+                    inspectorPage = inspectorModel.specialized ? InspectorPage::Specialized : InspectorPage::General;
+                if (ImGui::CollapsingHeader("Tools for this object"))
+                {
+                    const auto tool = [](const char *label, bool &open)
+                    {
+                        if (ImGui::Button(label))
+                            open = true;
+                    };
+                    if (object.cid >= 7 && object.cid <= 29)
+                        tool("Character Studio", showCharacterStudio);
+                    if (object.cid >= 32 && object.cid <= 39)
+                        tool("Breakable Studio", showBreakableStudio);
+                    if ((object.cid >= 47 && object.cid <= 52) || object.cid == 54 || object.cid == 55)
+                        tool("Security Network", showSecurityStudio);
+                    if (object.cid == 6 || object.cid == 40 || object.cid == 41 || object.cid == 52 ||
+                        object.cid == 57 || object.cid == 58)
+                        tool("Mechanism Studio", showMechanismStudio);
+                    if ((object.cid >= 44 && object.cid <= 46) || object.cid == 56 ||
+                        (object.cid >= 87 && object.cid <= 93) || object.cid == 116 || object.cid == 125)
+                        tool("Pickup & Progression Studio", showPickupStudio);
+                    if (object.cid == 35 || (object.cid >= 59 && object.cid <= 63) || object.cid == 70 ||
+                        object.cid == 71 || object.cid == 72 || object.cid == 76 || object.cid == 119 || object.cid == 140)
+                        tool("Weapon & Hazard Studio", showWeaponStudio);
+                    if (object.cid == 31) tool("Water Studio", showWaterStudio);
+                    if (object.cid == 97) tool("Shadow Studio", showShadowHelperStudio);
+                    if (object.cid == 99) tool("TN Camera Manager", showTnCameraManager);
+                    if (object.cid == 101) tool("Dialog Manager", showDialogManager);
+                    if (object.cid == 102) tool("Speaker Studio", showSpeakerManager);
+                    if (object.cid == 105 || object.cid == 106) tool("Hub Progression Studio", showHubProgressionStudio);
+                    if (object.cid == 125) tool("EXIT Transition Manager", showExitManager);
+                    if (object.cid == 56) tool("Checkpoint Manager", showCheckpointManager);
+                    if (object.cid == 133 || object.cid == 134) tool("Visibility Studio", showVisibilityStudio);
+                    if (object.cid == 108 || object.cid == 109) tool("Scene World settings", showSceneWorld);
+                    if (inspectorModel.specialized && ImGui::Button("Object-specific settings"))
+                        inspectorPage = InspectorPage::Specialized;
+                    if (inspectorModel.physics && ImGui::Button("Collision & physics settings"))
+                    {
+                        inspectorPage = InspectorPage::CollisionPhysics;
+                        showCollision = true;
+                    }
+                    if (inspectorModel.animation && ImGui::Button("Animation settings"))
+                        inspectorPage = InspectorPage::Animation;
+                    tool("CID Object Guide", showObjectUseGuide);
+                    tool("Level Validation", showValidationPanel);
+                    ImGui::TextWrapped("Opening a tool does not apply a preset, rewrite references or run gameplay scripts.");
+                }
                 const std::int32_t visualObjectIndex = sceneRenderer.SelectedVisualObjectIndex();
                 const std::int32_t gameplayOwnerIndex = sceneRenderer.ResolveLogicalOwner(visualObjectIndex);
                 if (visualObjectIndex >= 0 && static_cast<std::size_t>(visualObjectIndex) < document.Objects().size() &&
@@ -7315,9 +7988,9 @@ int RunEditorApplication()
                 };
                 ImGui::SeparatorText("Edit");
                 ImGui::TextColored(advancedUi ? ImVec4(1.0f, 0.68f, 0.25f, 1.0f) : ImVec4(0.35f, 0.85f, 0.55f, 1.0f),
-                                   "%s MODE", advancedUi ? "ADVANCED" : "BASIC");
+                                   "%s", advancedUi ? "Advanced controls" : "Common controls");
                 ImGui::SameLine();
-                if (ImGui::SmallButton(advancedUi ? "Use Basic" : "Use Advanced"))
+                if (ImGui::SmallButton(advancedUi ? "Show common controls" : "Show advanced controls"))
                 {
                     advancedUi = !advancedUi;
                     if (!advancedUi && inspectorPage == InspectorPage::Advanced)
@@ -17891,28 +18564,16 @@ int RunEditorApplication()
                         drawAloSetting(258, "How is this switch operated?");
                         if (buttonType >= 0 && buttonType < 5)
                             ImGui::TextWrapped("%s", kTypeHelp[buttonType]);
+                        ImGui::TextWrapped("Endpoint and hang-hook helpers must be direct runtime children of this BUTTON. Helpers nested inside another object are not read by PostButtonLoad. The visible model and collision are separate from these helper records.");
 
                         std::vector<std::int32_t> mechanismHelpers;
                         for (std::size_t candidateIndex = 0; candidateIndex < document.Objects().size();
                              ++candidateIndex)
                         {
-                            std::int32_t ancestor = static_cast<std::int32_t>(candidateIndex);
-                            bool belongs = false;
-                            for (std::size_t depth = 0; depth <= document.Objects().size() && ancestor >= 0 &&
-                                                        static_cast<std::size_t>(ancestor) < document.Objects().size();
-                                 ++depth)
-                            {
-                                if (ancestor == selectedObjectIndex)
-                                {
-                                    belongs = true;
-                                    break;
-                                }
-                                const auto parent = document.Objects()[static_cast<std::size_t>(ancestor)].parentIndex;
-                                if (parent == ancestor)
-                                    break;
-                                ancestor = parent;
-                            }
-                            if (!belongs || candidateIndex == static_cast<std::size_t>(selectedObjectIndex))
+                            const auto &helper = document.Objects()[candidateIndex];
+                            const auto runtimeParent = helper.proxyRuntimeParentIndex >= 0
+                                ? helper.proxyRuntimeParentIndex : helper.parentIndex;
+                            if (runtimeParent != selectedObjectIndex)
                                 continue;
                             const auto &candidate = document.Objects()[candidateIndex];
                             const bool requiredType = buttonType == 0   ? CidDerivesFrom(candidate.cid, 126)
@@ -17923,7 +18584,8 @@ int RunEditorApplication()
                             if (requiredType)
                                 mechanismHelpers.push_back(static_cast<std::int32_t>(candidateIndex));
                         }
-                        std::stable_sort(mechanismHelpers.begin(), mechanismHelpers.end(),
+                        if (buttonType == 0 || buttonType == 1)
+                            std::stable_sort(mechanismHelpers.begin(), mechanismHelpers.end(),
                                          [&](const std::int32_t left, const std::int32_t right)
                                          {
                                              return document.Objects()[static_cast<std::size_t>(left)].oid == 512 &&
@@ -17932,6 +18594,15 @@ int RunEditorApplication()
                         if (buttonType == 0 || buttonType == 1)
                         {
                             ImGui::SeparatorText(buttonType == 0 ? "Movement endpoints" : "Rotation endpoints");
+                            for (std::size_t endpoint = 0; endpoint < mechanismHelpers.size(); ++endpoint)
+                            {
+                                const auto helperIndex = mechanismHelpers[endpoint];
+                                ImGui::PushID(helperIndex);
+                                ImGui::TextWrapped("%zu. %s (OID %d)", endpoint + 1,
+                                    document.ObjectEditorLabel(helperIndex).c_str(),
+                                    document.Objects()[static_cast<std::size_t>(helperIndex)].oid);
+                                ImGui::PopID();
+                            }
                             if (!mechanismHelpers.empty() && ImGui::Button("Select rest endpoint"))
                             {
                                 sceneRenderer.SelectObject(mechanismHelpers[0]);
@@ -17958,7 +18629,9 @@ int RunEditorApplication()
                         else if (buttonType == 4)
                         {
                             if (!mechanismHelpers.empty() && ImGui::Button("Select hang hook"))
-                                sceneRenderer.SelectObject(mechanismHelpers.front());
+                                sceneRenderer.SelectObject(mechanismHelpers.back());
+                            if (mechanismHelpers.size() > 1)
+                                ImGui::TextWrapped("Multiple direct HND children found. PostButtonLoad keeps the last encountered hook; remove ambiguity before testing.");
                         }
 
                         ImGui::SeparatorText("Who can activate it?");
@@ -18243,19 +18916,10 @@ int RunEditorApplication()
                         int hangHooks = 0;
                         const auto belongsToSelectedButton = [&](const std::size_t candidateIndex)
                         {
-                            std::int32_t ancestor = static_cast<std::int32_t>(candidateIndex);
-                            for (std::size_t depth = 0; depth <= document.Objects().size() && ancestor >= 0 &&
-                                                        static_cast<std::size_t>(ancestor) < document.Objects().size();
-                                 ++depth)
-                            {
-                                if (ancestor == selectedObjectIndex)
-                                    return true;
-                                const auto parent = document.Objects()[static_cast<std::size_t>(ancestor)].parentIndex;
-                                if (parent == ancestor)
-                                    break;
-                                ancestor = parent;
-                            }
-                            return false;
+                            const auto &helper = document.Objects()[candidateIndex];
+                            const auto runtimeParent = helper.proxyRuntimeParentIndex >= 0
+                                ? helper.proxyRuntimeParentIndex : helper.parentIndex;
+                            return runtimeParent == selectedObjectIndex;
                         };
                         for (std::size_t candidateIndex = 0; candidateIndex < document.Objects().size();
                              ++candidateIndex)
@@ -18271,22 +18935,22 @@ int RunEditorApplication()
                             if (CidDerivesFrom(candidate.cid, 118))
                                 ++hangHooks;
                         }
-                        ImGui::Text("Hierarchy helpers: %d point stop(s), %d transform stop(s), %d hang hook(s)",
+                        ImGui::Text("Direct-child helpers: %d point stop(s), %d transform stop(s), %d hang hook(s)",
                                     pointStops, transformStops, hangHooks);
-                        if (pointStops > 2 || transformStops > 2)
+                        if ((buttonType == 0 && pointStops > 2) || (buttonType == 1 && transformStops > 2))
                             ImGui::TextColored(
                                 ImVec4(1.0f, 0.3f, 0.2f, 1.0f),
                                 "Too many stop helpers: the original runtime stores only two positions and two rotations.");
                         if (buttonType == 0 && pointStops != 2)
                             ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.2f, 1.0f),
-                                               "Push buttons require exactly two PNT stops in their hierarchy.");
+                                               "Push buttons require exactly two direct-child PNT stops.");
                         else if (buttonType == 1 && transformStops != 2)
                             ImGui::TextColored(
                                 ImVec4(1.0f, 0.65f, 0.2f, 1.0f),
-                                "Lever buttons require exactly two XFM stops in their hierarchy (TARGET is ignored).");
+                                "Lever buttons require exactly two direct-child XFM stops (TARGET is ignored).");
                         else if (buttonType == 4 && hangHooks == 0)
                             ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.2f, 1.0f),
-                                               "Hang buttons need an HND switch hook in their hierarchy.");
+                                               "Hang buttons need a direct-child HND switch hook.");
                         if (buttonType == 0 && propertyById(131) == nullptr)
                             ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.2f, 1.0f),
                                                "Push motion needs an SO force constraint to define its travel axis.");
@@ -18300,7 +18964,7 @@ int RunEditorApplication()
                                                      (buttonType != 1 || propertyById(132) != nullptr);
                         if (helpersReady && constraintReady)
                             ImGui::TextColored(ImVec4(0.35f, 0.9f, 0.45f, 1.0f),
-                                               "Ready: the mechanism has its required runtime structure.");
+                                               "Helper counts and constraint records found. References and in-game behavior still need testing.");
                         ImGui::TextDisabled(
                             "A stop matching OID 512 is always ordered first as the rest/off endpoint.");
                     }
@@ -18511,6 +19175,8 @@ int RunEditorApplication()
                     ImGui::TextWrapped(
                         "The runtime tests accepted objects against this object's collision sphere and BSP. "
                         "With no accepted-object entries, the current playable character is tested automatically.");
+                    ImGui::TextWrapped("VOLBTN detects object positions rather than physical contact. The sphere test runs only when sphere collision is enabled; if it does not contain the position, an authored BSP can still accept it. A sphere radius alone is not proof of a working trigger.");
+                    ImGui::TextWrapped("No authored accepted-object OIDs enables the playable-character fallback. A nonempty list with unresolved OIDs does not enable that fallback. Inspect references before assuming the volume is broken.");
                     if (ImGui::CollapsingHeader("Trigger shape", ImGuiTreeNodeFlags_DefaultOpen))
                     {
                         drawAloSetting(133, "Sphere collision radius");
@@ -18530,6 +19196,7 @@ int RunEditorApplication()
                     if (ImGui::CollapsingHeader("Trigger and reset behavior", ImGuiTreeNodeFlags_DefaultOpen))
                     {
                         drawAloSetting(269, "Seconds before the trigger can reset");
+                        ImGui::TextWrapped("A negative reset delay prevents automatic retriggering. Require exit keeps the trigger in Contact after the delay until accepted objects leave; it does not move or animate the volume.");
                         drawAloSetting(274, "Require every accepted object to exit before retriggering");
                         drawAloSetting(273, "Remember triggered state at checkpoints");
                         drawAloSetting(277, "Report accepted-object membership changes");
@@ -18537,8 +19204,11 @@ int RunEditorApplication()
                         drawAloSetting(279, "Dialog triggered on entry");
                         const BrxPropertyRecord *changes = propertyById(277);
                         if (changes != nullptr && changes->boolValue)
+                        {
                             ImGui::TextDisabled(
                                 "Change reporting enables the BTN manual-reset path during BRX loading.");
+                            ImGui::TextWrapped("Membership changes fire Splice event 12. This reports changes in the accepted objects currently within the volume, not every object nearby (button.cpp: UpdateVolbtn).");
+                        }
                     }
                     if (ImGui::CollapsingHeader("Animations and accepted objects", ImGuiTreeNodeFlags_DefaultOpen))
                     {
@@ -27844,7 +28514,7 @@ int RunEditorApplication()
                     ImGui::SeparatorText("Shape path");
                     if (object.cid == 110)
                         ImGui::TextWrapped(
-                            "SHAPE is the reusable curve base. It has no class-owned SetUser options; edit the authored curve and inherited LO placement here.");
+                            "SHAPE is the reusable curve base. It has no native object transform: movement, rotation and scaling edit its points and cubic derivatives in the parent coordinate space.");
                     auto shapeIt = std::find_if(
                         document.EditableShapePaths().begin(), document.EditableShapePaths().end(),
                         [&](const BrxShapePathRecord &shape) { return shape.ownerObjectIndex == selectedObjectIndex; });
@@ -27873,7 +28543,7 @@ int RunEditorApplication()
                             shapePreviewParameter = 0.0f;
                             shapePreviewPlaying = false;
                         }
-                        ImGui::BeginDisabled(object.proxyClone);
+                        ImGui::BeginDisabled(object.proxyClone || sceneRenderer.IsObjectLocked(selectedObjectIndex));
                         ImGui::SeparatorText("Viewport transform target");
                         if (ImGui::RadioButton("Selected point", !shapeGizmoWholeCurve))
                             shapeGizmoWholeCurve = false;
@@ -27882,8 +28552,98 @@ int RunEditorApplication()
                             shapeGizmoWholeCurve = true;
                         ImGui::TextDisabled(
                             shapeGizmoWholeCurve
-                                ? "The W move gizmo offsets every control point together without changing the curve's shape."
+                                ? "W moves, E rotates and R scales all points and cubic derivatives around the chosen pivot."
                                 : "The W move gizmo edits only the selected control point.");
+                        if (shapeGizmoWholeCurve)
+                        {
+                            const char *pivots[]{"Path center", "First point", "Selected point"};
+                            ImGui::Combo("Transform pivot", &shapePivotMode, pivots, 3);
+                            if (ImGui::Button("Move path")) gizmoMode = 0;
+                            ImGui::SameLine();
+                            if (ImGui::Button("Rotate path")) gizmoMode = 1;
+                            ImGui::SameLine();
+                            if (ImGui::Button("Scale path")) gizmoMode = 2;
+                            if (ImGui::Button("Place pivot at cursor..."))
+                            {
+                                shapePlaceAtCursor = selectedObjectIndex;
+                                shapeDrawMode = false;
+                                pathZoneDrawMode = false;
+                                status = "Click gameplay collision to place the SHAPE pivot. Esc cancels.";
+                            }
+                            if (shapePlaceAtCursor == selectedObjectIndex)
+                                ImGui::TextWrapped("Waiting for a viewport surface click. The whole path will translate; rotation and scale stay unchanged. Esc cancels.");
+                        }
+                        if (ImGui::Button("Frame complete path"))
+                        {
+                            glm::mat4 parent(1.0f);
+                            if (object.parentIndex >= 0 && static_cast<std::size_t>(object.parentIndex) < document.Objects().size())
+                                parent = sceneRenderer.ResolvedObjectTransform(object.parentIndex);
+                            const auto center = ShapeEditing::Pivot(shape, 0, selectedShapePoint);
+                            float radius = 25.0f;
+                            const glm::vec3 worldCenter(parent * glm::vec4(center, 1.0f));
+                            for (const auto &p : shape.points)
+                                radius = (std::max)(radius, glm::distance(worldCenter, glm::vec3(parent * glm::vec4(p[0], p[1], p[2], 1.0f))));
+                            camera.FocusPoint(worldCenter, radius * 2.5f);
+                        }
+                        ImGui::TextWrapped("PIPE, RAIL, HSHAPE and LANDING each contain their own SHAPE curve. A separate SHAPE child is not required for the basic path. These transforms edit curve geometry only: facing vectors, traversal limits, visible models and collision remain separate settings.");
+                        if (ImGui::TreeNode("Precise whole-path transform"))
+                        {
+                            static glm::vec3 pathOffset(0.0f), pathAngles(0.0f), pathScale(1.0f);
+                            ImGui::DragFloat3("World offset", glm::value_ptr(pathOffset), 1.0f);
+                            ImGui::DragFloat3("World rotation (degrees)", glm::value_ptr(pathAngles), 0.25f);
+                            ImGui::DragFloat3("World-axis scale factors", glm::value_ptr(pathScale), 0.01f, 0.001f, 1000.0f);
+                            ImGui::TextWrapped("Applies once around the selected pivot. Curve parameters are preserved; cubic derivatives rotate/scale with the path. Scaling traversal geometry can change gameplay distances.");
+                            if (ImGui::Button("Apply path transform"))
+                            {
+                                glm::mat4 parent(1.0f);
+                                if (object.parentIndex >= 0 && static_cast<std::size_t>(object.parentIndex) < document.Objects().size())
+                                    parent = sceneRenderer.ResolvedObjectTransform(object.parentIndex);
+                                const float determinant = glm::determinant(parent);
+                                const auto pivot = ShapeEditing::Pivot(shape, shapePivotMode, selectedShapePoint);
+                                const glm::vec3 worldPivot(parent * glm::vec4(pivot, 1.0f));
+                                if (std::isfinite(determinant) && std::abs(determinant) > 0.000001f &&
+                                    pathScale.x > 0.0f && pathScale.y > 0.0f && pathScale.z > 0.0f)
+                                {
+                                    const auto worldDelta = glm::translate(glm::mat4(1.0f), pathOffset + worldPivot) *
+                                        glm::mat4_cast(glm::quat(glm::radians(pathAngles))) *
+                                        glm::scale(glm::mat4(1.0f), pathScale) * glm::translate(glm::mat4(1.0f), -worldPivot);
+                                    if (ShapeEditing::Transform(shape, glm::inverse(parent) * worldDelta * parent))
+                                    {
+                                        pathOffset = pathAngles = glm::vec3(0.0f);
+                                        pathScale = glm::vec3(1.0f);
+                                        sceneRenderer.EmitterPreview().RestartAll();
+                                        status = "Applied whole-path transform to native SHAPE data.";
+                                    }
+                                    else status = "SHAPE transform rejected: values must remain finite.";
+                                }
+                                else status = "SHAPE needs a nonsingular parent and positive scale factors.";
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::Button("Reset transform inputs"))
+                            {
+                                pathOffset = pathAngles = glm::vec3(0.0f);
+                                pathScale = glm::vec3(1.0f);
+                            }
+                            ImGui::TreePop();
+                        }
+                        if (ImGui::TreeNode("Path role & consumers"))
+                        {
+                            switch (object.cid)
+                            {
+                            case 110:
+                                ImGui::TextWrapped("General SHAPE: the consumer decides its purpose. LASEN accepts linear beam shapes, EMITTER can reference a SHAPE curve, and JSG can use curves for choreography. EXPLO's similarly named shape link uses an XFM origin instead. A bare path does not automatically enable traversal."); break;
+                            case 111:
+                                ImGui::TextWrapped("HSHAPE: hiding movement along a curve, with hiding limits and an optional TN camera binding. Inspect the hiding controls below after shaping the path."); break;
+                            case 112:
+                                ImGui::TextWrapped("PIPE: climb path and facing settings, with an optional rope reference. Edit the endpoints to match the visible ladder. A second SHAPE is not needed for the basic climb curve."); break;
+                            case 113:
+                                ImGui::TextWrapped("RAIL: traversal/balance curve with direction, movement settings and optional rope binding. Reversing the path changes its parameter direction; it does not automatically rewrite scripts or facing settings."); break;
+                            case 114:
+                                ImGui::TextWrapped("LANDING: an enemy landing-path specialization used by FLY behavior. It is not a player ladder or collision surface."); break;
+                            }
+                            ImGui::TextWrapped("Related objects & references above can help inspect explicit bindings. Some consumers use direct children or fixed lookups, so that list is not a complete dependency check.");
+                            ImGui::TreePop();
+                        }
                         ImGui::SeparatorText("Build curve from objects");
                         static int shapeObjectOrder = 0;
                         static bool shapeObjectsClosed = false;
@@ -29155,16 +29915,49 @@ int RunEditorApplication()
                 if (inspectorPage == InspectorPage::Specialized && object.cid == 118)
                 {
                     ImGui::SeparatorText("Handhold traversal");
+                    ImGui::TextWrapped("A handhold is an interaction marker. Its visible hook model and collision can belong to other objects; creating or moving the marker does not create those parts.");
+                    ImGui::SeparatorText("Attachment & related objects");
+                    const auto handholdParentIndex = object.parentIndex;
+                    if (handholdParentIndex >= 0 &&
+                        static_cast<std::size_t>(handholdParentIndex) < document.Objects().size())
+                    {
+                        const auto &parent = document.Objects()[static_cast<std::size_t>(handholdParentIndex)];
+                        ImGui::TextWrapped("Recorded parent: %s (%s, OID %d)",
+                                           document.ObjectEditorLabel(handholdParentIndex).c_str(),
+                                           BrxDocument::ClassName(parent.cid), parent.oid);
+                        ImGui::Text("Parent model groups: %u | SO collision payload: %s",
+                                    static_cast<unsigned>(parent.renderGroupCount), parent.so.present ? "present" : "absent");
+                        if (ImGui::Button("Inspect handhold parent"))
+                            sceneRenderer.SelectObject(handholdParentIndex);
+                        ImGui::TextWrapped("These are the parent's recorded resources, not proof that they form this hook's visible model or usable collision. PROXY instances may have a different resolved runtime parent.");
+                    }
+                    else
+                        ImGui::TextWrapped("No recorded parent. This is not automatically an error; inspect the intended assembly before changing its hierarchy.");
+                    ImGui::SeparatorText("Grab & hang settings");
                     drawAloSetting(337, "Grab direction");
-                    drawAloSetting(338, "Legacy jump-boost value");
                     drawAloSetting(339, "Grab sound effect");
                     drawAloSetting(340, "Release sound effect");
-                    drawAloSetting(341, "Hook radius");
+                    drawAloSetting(341, "Hook surface radius (hang offset)");
                     drawAloSetting(342, "Special grab behavior");
                     drawAloSetting(343, "Maximum jump-target height");
+                    ImGui::TextWrapped("Hook contact uses Target radius above plus Sly's own hook radius, tested against the swept hook segments (jt.cpp). Hook surface radius instead offsets the hanging hand and adjusts swing distance (stephang.cpp). Grab direction chooses the forward/backward hanging heading.");
+                    ImGui::TextWrapped("Jump-target height limit: for an unforced target, the jump search rejects this HND when Sly's Z minus the target's Z exceeds this value. The default is FLT_MAX (effectively unlimited); this is not a general upward grab-distance limit (stephide.cpp).");
+                    ImGui::SeparatorText("Grab / release events");
+                    ImGui::Text("Recorded Splice index: %d", object.spliceIndex);
+                    ImGui::BulletText("Event 2: fired on the HND when Sly enters the hanging state.");
+                    ImGui::BulletText("Event 3: fired on the HND when Sly leaves the hanging state.");
+                    ImGui::TextWrapped("An event is not a guarantee that a script is bound. Review the module and any fixed OID lookups before duplicating a hook; copied objects can still share a module that refers to the original assembly.");
+                    if (ImGui::Button("Open Splice Events for inspection"))
+                        showSpliceEvents = true;
+                    if (ImGui::TreeNode("Advanced / preserved values"))
+                    {
+                        drawAloSetting(338, "Legacy jump-boost value");
+                        ImGui::TextWrapped("ProjectCane stores this value, but the HND traversal implementation does not read it. It is preserved for native compatibility.");
+                        ImGui::TreePop();
+                    }
                     ImGui::SeparatorText("Traversal preview");
                     ImGui::TextWrapped(
-                        "The marker orientation defines forward/backward approach and hook radius controls grab proximity. ProjectCane stores EOPID 338 but does not read it in HND traversal code.");
+                        "Show the existing gameplay-marker overlay to locate the handhold. This is a marker preview, not a simulation of a successful grab, collision or scripts. Test the complete interaction in game.");
                     if (ImGui::Button("Show handhold preview"))
                         showGameplayMarkers = true;
                 }
@@ -33592,12 +34385,26 @@ int RunEditorApplication()
                                                 schemaIsPrimaryEditor ? ImGuiTreeNodeFlags_DefaultOpen : 0))
                     {
                         ImGui::TextWrapped(
-                            "This is the authoritative persistent authoring surface for this CID. It includes inherited and class-owned BRX options that ProjectCane loads through SetUser; runtime actions and query-only state are intentionally excluded.");
+                            "Find a native authoring setting by name. Class-owned fields are shown first by default; include inherited fields for shared rendering, physics and object options. These controls retain the existing ProjectCane SetUser rules.");
                         static ImGuiTextFilter setUserFilter;
+                        static bool includeInheritedSettings = false;
+                        const auto classOwnedCount = std::count_if(writableSchema.begin(), writableSchema.end(),
+                            [&](const PropertySchemaEntry &entry)
+                            { return PropertyOwnerCid(object.cid, entry.eopid) == object.cid; });
+                        ImGui::Checkbox("Include inherited settings", &includeInheritedSettings);
+                        ImGui::TextDisabled("%zu class-owned | %zu total editable fields",
+                            static_cast<std::size_t>(classOwnedCount), writableSchema.size());
                         setUserFilter.Draw("Search properties", -1.0f);
+                        if (setUserFilter.IsActive())
+                            ImGui::TextDisabled("Search includes inherited settings.");
+                        else if (classOwnedCount == 0)
+                            ImGui::TextWrapped("This CID has no class-owned SetUser fields; showing its inherited fields. Structured payloads, when available, use the dedicated controls above or other Inspector pages.");
                         std::size_t visibleCount = 0;
                         for (const auto &entry : writableSchema)
                         {
+                            if (!includeInheritedSettings && !setUserFilter.IsActive() && classOwnedCount != 0 &&
+                                PropertyOwnerCid(object.cid, entry.eopid) != object.cid)
+                                continue;
                             const std::string searchable = entry.displayName + " EOPID " + std::to_string(entry.eopid);
                             if (!setUserFilter.PassFilter(searchable.c_str()))
                                 continue;
@@ -33681,6 +34488,27 @@ int RunEditorApplication()
                     glm::vec4 perspective;
                     glm::quat orientation;
                     const bool editingInstance = selectedInstance != document.EditableGlobs().end();
+                    const std::int32_t collisionMoveOwner = sceneRenderer.ResolveLogicalOwner(selectedObjectIndex);
+                    if (editingInstance || (collisionMoveOwner >= 0 && collisionMoveOwner != selectedObjectIndex))
+                    {
+                        ImGui::TextWrapped("Moving a model part or instance does not move a separately owned collision object. Select the owning object to use the existing object-and-collision move path.");
+                        if (collisionMoveOwner >= 0 &&
+                            static_cast<std::size_t>(collisionMoveOwner) < document.Objects().size())
+                        {
+                            ImGui::TextWrapped("Owner: %s", document.ObjectEditorLabel(collisionMoveOwner).c_str());
+                            if (ImGui::Button("Select owner to move with owned collision"))
+                            {
+                                sceneRenderer.SelectObject(collisionMoveOwner);
+                                gizmoMode = 0;
+                                showCollision = true;
+                            }
+                        }
+                    }
+                    else if (object.so.present)
+                    {
+                        ImGui::TextWrapped("Object moves include its owned collision. Enable the overlay to check alignment; collision owned by another object is not automatically linked.");
+                        ImGui::Checkbox("Show collision while positioning", &showCollision);
+                    }
                     const glm::mat4 before = editingInstance ? glm::make_mat4(selectedInstance->instanceTransform)
                                                              : glm::make_mat4(object.worldTransform);
                     if (editingInstance)
@@ -33861,25 +34689,8 @@ int RunEditorApplication()
                     ImGui::BeginDisabled(!reviewSingleZone);
                     if (ImGui::Button("Apply single-zone setup"))
                     {
-                        BrxVisibilityNode root{};
-                        root.normal[0] = 1.0f;
-                        root.negativeChild = root.positiveChild = -1;
-                        root.negativeZoneMask = root.positiveZoneMask = 1u;
-                        nodes.assign(1, root);
-                        oneHopMasks.assign(1, 1u);
-                        document.EditableWorldHeader().visibilityZoneCount = 1;
-                        document.EditableVisibilityZoneNames().assign(1, "Main map");
-                        for (auto &object : document.EditableObjects())
-                            if (object.hasAloPayload)
-                                object.zoneMask = 1u;
-                        for (auto &glob : document.EditableGlobs())
-                        {
-                            glob.zoneMask = 1u;
-                            glob.hasZoneMask = true;
-                            glob.propertyMask |= 0x002u;
-                        }
+                        VisibilityMap::SingleZone(document);
                         selectedVisibilityNode = selectedVisibilityZone = 0;
-                        document.RebuildRenderPacketsFromGlobs();
                         sceneRenderer.ReloadDerivedRenderPackets(document);
                         sceneRenderer.UpdateVisibility(nodes, oneHopMasks);
                         reviewSingleZone = false;
@@ -34500,42 +35311,15 @@ int RunEditorApplication()
 
                         const auto editMembership = [&](const int operation)
                         {
-                            const auto bit = 1u << selectedVisibilityZone;
-                            const auto change = [&](std::uint32_t mask)
+                            std::vector<std::int32_t> selectedObjects(sceneRenderer.SelectedObjectIndices().begin(), sceneRenderer.SelectedObjectIndices().end());
+                            std::vector<std::size_t> selectedGlobs;
+                            for (std::size_t i = 0; i < document.Globs().size(); ++i)
                             {
-                                return operation == 0 ? mask | bit : operation == 1 ? mask & ~bit : bit;
-                            };
-                            std::size_t objectsChanged = 0, modelsChanged = 0;
-                            for (const auto index : sceneRenderer.SelectedObjectIndices())
-                            {
-                                if (index < 0 || static_cast<std::size_t>(index) >= document.Objects().size())
-                                    continue;
-                                auto &object = document.EditableObjects()[index];
-                                if (!object.hasAloPayload)
-                                    continue;
-                                object.zoneMask = change(object.zoneMask);
-                                ++objectsChanged;
+                                const auto &glob = document.Globs()[i];
+                                if (sceneRenderer.IsRenderGroupSelected(glob.renderGroup) ||
+                                    (sceneRenderer.HasSubglobSelection() && sceneRenderer.SelectedRenderGroup() == glob.renderGroup)) selectedGlobs.push_back(i);
                             }
-                            for (auto &glob : document.EditableGlobs())
-                            {
-                                const bool selectedOwner =
-                                    sceneRenderer.SelectedObjectIndices().contains(glob.ownerObjectIndex);
-                                if (!selectedOwner && !sceneRenderer.IsRenderGroupSelected(glob.renderGroup) &&
-                                    !(sceneRenderer.HasSubglobSelection() &&
-                                      sceneRenderer.SelectedRenderGroup() == glob.renderGroup))
-                                    continue;
-                                const auto *inherited = &glob;
-                                for (std::size_t guard = 0; !inherited->hasZoneMask && inherited->instanced &&
-                                                            inherited->sourceRecordIndex < document.Globs().size() &&
-                                                            guard < document.Globs().size();
-                                     ++guard)
-                                    inherited = &document.Globs()[inherited->sourceRecordIndex];
-                                glob.zoneMask = change(inherited->hasZoneMask ? inherited->zoneMask : 0u);
-                                glob.hasZoneMask = true;
-                                glob.propertyMask |= 0x002u;
-                                ++modelsChanged;
-                            }
-                            document.RebuildRenderPacketsFromGlobs();
+                            const auto [objectsChanged, modelsChanged] = VisibilityMap::EditMembership(document, selectedObjects, selectedGlobs, selectedVisibilityZone, operation);
                             sceneRenderer.ReloadDerivedRenderPackets(document);
                             status = "Updated " + std::to_string(objectsChanged) + " objects and " +
                                      std::to_string(modelsChanged) + " models. Zero masks bypass retail zone culling.";
@@ -35464,6 +36248,7 @@ int RunEditorApplication()
         {
             ImGui::TextDisabled("Select an object to inspect it.");
         }
+        } // Inspector contents are skipped when its dock tab is hidden.
         ImGui::End();
         currentFramePerformance.inspectorMs = (glfwGetTime() - inspectorStart) * 1000.0;
 
@@ -35786,10 +36571,7 @@ int RunEditorApplication()
 
         currentFramePerformance.physicsPreviewMs = (glfwGetTime() - physicsPreviewStart) * 1000.0;
         const double viewportAndToolsStart = glfwGetTime();
-        ImGui::SetNextWindowPos(ImVec2(leftWidth, menuHeight));
-        ImGui::SetNextWindowSize(
-            ImVec2(framebufferWidth - leftWidth - rightWidth, framebufferHeight - menuHeight - statusHeight));
-        ImGui::Begin("Viewport", nullptr, panelFlags | ImGuiWindowFlags_NoScrollbar);
+        const bool viewportVisible = ImGui::Begin("Viewport", nullptr, panelFlags | ImGuiWindowFlags_NoScrollbar);
         const auto toolbarObjectIndex = sceneRenderer.SelectedObjectIndex();
         const bool toolbarHasObject =
             toolbarObjectIndex >= 0 && static_cast<std::size_t>(toolbarObjectIndex) < document.Objects().size();
@@ -35797,7 +36579,7 @@ int RunEditorApplication()
         {
             const bool wasActive = gizmoMode == mode;
             if (wasActive)
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.42f, 0.68f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
             if (ImGui::SmallButton(label))
                 gizmoMode = mode;
             if (wasActive)
@@ -35843,9 +36625,19 @@ int RunEditorApplication()
         }
         else
             ImGui::TextDisabled("No selection  |  Ctrl+P for commands");
+        ImGui::TextColored(ImVec4(0.25f, 0.80f, 0.85f, 1.0f), "Editing: %s",
+                           !toolbarHasObject ? "nothing selected"
+                           : sceneRenderer.HasSubglobSelection() ? "model part"
+                           : sceneRenderer.HasGlobSelection() ? "model"
+                                                              : "object");
+        ImGui::SameLine();
+        ImGui::Checkbox("Show collision", &showCollision);
+        ImGui::SameLine();
+        ImGui::Checkbox("Gameplay markers", &showGameplayMarkers);
         ImGui::Separator();
         const ImVec2 viewportOrigin = ImGui::GetCursorScreenPos();
-        const ImVec2 viewportSize = ImGui::GetContentRegionAvail();
+        const ImVec2 viewportAvailable = ImGui::GetContentRegionAvail();
+        const ImVec2 viewportSize((std::max)(viewportAvailable.x, 1.0f), (std::max)(viewportAvailable.y, 1.0f));
         if (dialogPreviewPlaying && dialogPreviewObject >= 0 &&
             static_cast<std::size_t>(dialogPreviewObject) < document.Objects().size())
         {
@@ -37472,13 +38264,13 @@ int RunEditorApplication()
         }
         else
             sceneRenderer.ClearConveyorPreview();
-        const GLuint viewportTexture = sceneRenderer.Render(
+        const GLuint viewportTexture = viewportVisible ? sceneRenderer.Render(
             camera, static_cast<int>(viewportSize.x), static_cast<int>(viewportSize.y), framebufferHeight,
             frustumCulling, bspCulling, renderCelBorders && !wireframe, showSelectionHighlight, selectionColor, fogType,
             document.CollisionTriangles(), showCollision, showGameplayCollision, showCameraCollision,
             collisionColorMode, gameplayCollisionColor, cameraCollisionColor,
             showSelectedObjectCollisionOnly ? sceneRenderer.SelectedObjectIndex()
-                                            : (std::numeric_limits<std::int32_t>::min)());
+                                            : (std::numeric_limits<std::int32_t>::min)()) : 0;
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         const ImTextureID viewportImage = (ImTextureID)(intptr_t)viewportTexture;
         ImGui::Image(viewportImage, viewportSize, ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
@@ -37546,7 +38338,7 @@ int RunEditorApplication()
         }
         ImGui::SetCursorScreenPos(viewportOrigin);
         ImGui::InvisibleButton("ViewportSurface", viewportSize);
-        const bool viewportHovered = ImGui::IsItemHovered();
+        const bool viewportHovered = viewportVisible && ImGui::IsItemHovered();
         HandleViewportAssetDrop(document, workspace, sceneRenderer, camera, gizmoMode, status);
         struct TnViewportHit
         {
@@ -43921,6 +44713,18 @@ int RunEditorApplication()
         const auto gizmoShape = std::find_if(document.EditableShapePaths().begin(), document.EditableShapePaths().end(),
                                              [&](const BrxShapePathRecord &candidate)
                                              { return candidate.ownerObjectIndex == gizmoObjectIndex; });
+        if (shapePlaceAtCursor >= 0 && shapePlaceAtCursor != sceneRenderer.SelectedObjectIndex())
+        {
+            shapePlaceAtCursor = -1;
+            status = "Cancelled SHAPE cursor placement because selection changed.";
+        }
+        if (gizmoShape != document.EditableShapePaths().end() && shapePreviewObject != gizmoObjectIndex)
+        {
+            shapePreviewObject = gizmoObjectIndex;
+            selectedShapePoint = 0;
+            shapePreviewPlaying = false;
+            showPaths = true;
+        }
         const bool hasShapePointGizmo = hasGizmoObject &&
                                         !document.Objects()[static_cast<std::size_t>(gizmoObjectIndex)].proxyClone &&
                                         shapePreviewObject == gizmoObjectIndex && !shapeGizmoWholeCurve &&
@@ -43932,7 +44736,7 @@ int RunEditorApplication()
             gizmoShape != document.EditableShapePaths().end() && !gizmoShape->points.empty();
         const bool hasShapeGizmo = hasShapePointGizmo || hasWholeShapeGizmo;
         const bool positionOnlyGizmo =
-            hasShapeGizmo ||
+            hasShapePointGizmo ||
             (hasGizmoObject && CidDerivesFrom(document.Objects()[static_cast<std::size_t>(gizmoObjectIndex)].cid, 126));
         const int effectiveGizmoMode = positionOnlyGizmo ? 0 : gizmoMode;
         const bool hasGizmoTarget = hasGizmoObject || selectedInstanceGlobIndex != static_cast<std::size_t>(-1);
@@ -43977,13 +44781,7 @@ int RunEditorApplication()
                 glm::vec3 localAnchor(0.0f);
                 if (hasWholeShapeGizmo)
                 {
-                    const std::size_t pointCount = gizmoShape->closed && gizmoShape->points.size() > 1
-                                                       ? gizmoShape->points.size() - 1
-                                                       : gizmoShape->points.size();
-                    for (std::size_t pointIndex = 0; pointIndex < pointCount; ++pointIndex)
-                        localAnchor += glm::vec3(gizmoShape->points[pointIndex][0], gizmoShape->points[pointIndex][1],
-                                                 gizmoShape->points[pointIndex][2]);
-                    localAnchor /= static_cast<float>(pointCount);
+                    localAnchor = ShapeEditing::Pivot(*gizmoShape, shapePivotMode, selectedShapePoint);
                 }
                 else
                 {
@@ -43991,6 +44789,13 @@ int RunEditorApplication()
                     localAnchor = glm::vec3(point[0], point[1], point[2]);
                 }
                 objectTransform = glm::mat4(1.0f);
+                if (gizmoLocal && hasWholeShapeGizmo)
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        const glm::vec3 basis(parentWorld[axis]);
+                        if (glm::length(basis) > 0.000001f)
+                            objectTransform[axis] = glm::vec4(glm::normalize(basis), 0.0f);
+                    }
                 objectTransform[3] = parentWorld * glm::vec4(localAnchor, 1.0f);
             }
             if (!hasShapeGizmo && selectedInstanceGlobIndex != static_cast<std::size_t>(-1))
@@ -44039,7 +44844,7 @@ int RunEditorApplication()
                 overlay->AddCircleFilled(ends[axis], hot ? 6.0f : 4.0f,
                                          hot ? IM_COL32(255, 235, 80, 255) : colors[axis]);
             }
-            if (viewportHovered && hoveredAxis >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            if (viewportHovered && hoveredAxis >= 0 && shapePlaceAtCursor < 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
             {
                 activeGizmoAxis = hoveredAxis;
                 gizmoStartTransform = objectTransform;
@@ -44047,7 +44852,10 @@ int RunEditorApplication()
                 activeGizmoShapeObject = hasShapeGizmo ? gizmoObjectIndex : -1;
                 activeGizmoShapePoint = hasShapePointGizmo ? selectedShapePoint : -1;
                 activeGizmoShapeWholeCurve = hasWholeShapeGizmo;
+                shapeGizmoTransformValid = true;
                 gizmoStartShapePoints = hasShapeGizmo ? gizmoShape->points : std::vector<std::array<float, 3>>{};
+                gizmoStartShapeTangentsIn = hasShapeGizmo ? gizmoShape->tangentsIn : std::vector<std::array<float, 3>>{};
+                gizmoStartShapeTangentsOut = hasShapeGizmo ? gizmoShape->tangentsOut : std::vector<std::array<float, 3>>{};
                 if (activeGizmoGlobIndex != static_cast<std::size_t>(-1))
                 {
                     gizmoStartGlobInstance = glm::make_mat4(document.Globs()[activeGizmoGlobIndex].instanceTransform);
@@ -44138,25 +44946,34 @@ int RunEditorApplication()
                         {
                             if (activeGizmoShapeWholeCurve && gizmoStartShapePoints.size() == shape->points.size())
                             {
-                                const glm::vec3 worldDelta = glm::vec3(target[3] - gizmoStartTransform[3]);
-                                const glm::vec3 localDelta = glm::inverse(parentLinear) * worldDelta;
-                                for (std::size_t pointIndex = 0; pointIndex < shape->points.size(); ++pointIndex)
-                                {
-                                    const auto &start = gizmoStartShapePoints[pointIndex];
-                                    shape->points[pointIndex] = {start[0] + localDelta.x, start[1] + localDelta.y,
-                                                                 start[2] + localDelta.z};
-                                }
+                                auto transformed = *shape;
+                                transformed.points = gizmoStartShapePoints;
+                                transformed.tangentsIn = gizmoStartShapeTangentsIn;
+                                transformed.tangentsOut = gizmoStartShapeTangentsOut;
+                                const auto localDelta = glm::inverse(parentWorld) * groupDelta * parentWorld;
+                                shapeGizmoTransformValid = ShapeEditing::Transform(transformed, localDelta);
+                                if (shapeGizmoTransformValid)
+                                    *shape = std::move(transformed);
+                                else
+                                    status = "SHAPE transform rejected: values must remain finite.";
                             }
                             else
                             {
                                 const glm::vec3 localPoint = glm::vec3(glm::inverse(parentWorld) * target[3]);
-                                shape->points[static_cast<std::size_t>(activeGizmoShapePoint)] = {
-                                    localPoint.x, localPoint.y, localPoint.z};
+                                shapeGizmoTransformValid = std::isfinite(localPoint.x) &&
+                                    std::isfinite(localPoint.y) && std::isfinite(localPoint.z);
+                                if (shapeGizmoTransformValid)
+                                    shape->points[static_cast<std::size_t>(activeGizmoShapePoint)] = {
+                                        localPoint.x, localPoint.y, localPoint.z};
+                                else status = "SHAPE point move rejected: coordinates must remain finite.";
                             }
                             sceneRenderer.EmitterPreview().RestartAll();
                         }
                         else
+                        {
+                            shapeGizmoTransformValid = false;
                             status = "Cannot move this SHAPE point because its parent transform is singular.";
+                        }
                     }
                 }
                 else if (activeGizmoGlobIndex != static_cast<std::size_t>(-1) &&
@@ -44198,7 +45015,9 @@ int RunEditorApplication()
             {
                 if (activeGizmoShapeObject >= 0 && activeGizmoShapeWholeCurve)
                 {
-                    status = "Moved the complete SHAPE curve with the position gizmo.";
+                    status = shapeGizmoTransformValid
+                        ? "Transformed the complete SHAPE curve (points and cubic derivatives)."
+                        : "Invalid SHAPE transform rejected; the last valid curve was retained.";
                 }
                 else if (activeGizmoShapeObject >= 0 && activeGizmoShapePoint >= 0)
                 {
@@ -44230,11 +45049,13 @@ int RunEditorApplication()
                 activeGizmoShapePoint = -1;
                 activeGizmoShapeWholeCurve = false;
                 gizmoStartShapePoints.clear();
+                gizmoStartShapeTangentsIn.clear();
+                gizmoStartShapeTangentsOut.clear();
                 gizmoConsumedMouse = true;
             }
             overlay->PopClipRect();
         }
-        if (viewportHovered && !gizmoConsumedMouse && !shapeDrawMode && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        if (viewportHovered && !gizmoConsumedMouse && !shapeDrawMode && shapePlaceAtCursor < 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
         {
             const ImVec2 mouse = ImGui::GetMousePos();
             float bestDistanceSquared = 100.0f;
@@ -44285,14 +45106,16 @@ int RunEditorApplication()
                 sceneRenderer.SelectObject(shapeDragObject);
                 shapePreviewObject = shapeDragObject;
                 selectedShapePoint = shapeDragPoint;
+                shapeGizmoWholeCurve = false;
                 inspectorPage = InspectorPage::Specialized;
-                if (document.Objects()[static_cast<std::size_t>(shapeDragObject)].proxyClone)
+                if (document.Objects()[static_cast<std::size_t>(shapeDragObject)].proxyClone ||
+                    sceneRenderer.IsObjectLocked(shapeDragObject))
                 {
                     shapeDragObject = -1;
                     shapeDragPoint = -1;
                     shapeDragHandle = -1;
                     status =
-                        "Linked PROXY SHAPE curves are read-only. Use Make unique before editing the shared curve.";
+                        "This SHAPE is locked or linked to a PROXY source. Unlock it or make the hierarchy unique before editing.";
                 }
                 else
                     shapeDragLastMouse = mouse;
@@ -44478,8 +45301,8 @@ int RunEditorApplication()
             if (drag.x * drag.x + drag.y * drag.y <= 16.0f)
             {
                 const ImVec2 mouse = ImGui::GetMousePos();
-                bool pathZoneClickConsumed = pathZoneDrawMode || shapeDrawMode;
-                if ((pathZoneDrawMode || shapeDrawMode) && viewportSize.x > 1.0f && viewportSize.y > 1.0f)
+                bool pathZoneClickConsumed = pathZoneDrawMode || shapeDrawMode || shapePlaceAtCursor >= 0;
+                if ((pathZoneDrawMode || shapeDrawMode || shapePlaceAtCursor >= 0) && viewportSize.x > 1.0f && viewportSize.y > 1.0f)
                 {
                     const float ndcX = 2.0f * (mouse.x - viewportOrigin.x) / viewportSize.x - 1.0f;
                     const float ndcY = 1.0f - 2.0f * (mouse.y - viewportOrigin.y) / viewportSize.y;
@@ -44534,7 +45357,7 @@ int RunEditorApplication()
                     }
                     if (bestDistance < std::numeric_limits<float>::max())
                     {
-                        const float activeGrid = shapeDrawMode ? shapeSnapGrid : pathZoneDrawGrid;
+                        const float activeGrid = shapeDrawMode || shapePlaceAtCursor >= 0 ? shapeSnapGrid : pathZoneDrawGrid;
                         if (activeGrid > 0.0f)
                         {
                             bestPoint.x = std::round(bestPoint.x / activeGrid) * activeGrid;
@@ -44546,10 +45369,43 @@ int RunEditorApplication()
                                     bestPlanePoint.z - (bestPlaneNormal.x * (bestPoint.x - bestPlanePoint.x) +
                                                         bestPlaneNormal.y * (bestPoint.y - bestPlanePoint.y)) /
                                                            bestPlaneNormal.z;
-                            else if (shapeDrawMode)
+                            else if (shapeDrawMode || shapePlaceAtCursor >= 0)
                                 bestPoint.z = std::round(bestPoint.z / activeGrid) * activeGrid;
                         }
-                        if (shapeDrawMode && shapeDrawWorldPoints.size() < 255)
+                        if (shapePlaceAtCursor >= 0)
+                        {
+                            auto path = std::find_if(document.EditableShapePaths().begin(), document.EditableShapePaths().end(),
+                                [&](const BrxShapePathRecord &s) { return s.ownerObjectIndex == shapePlaceAtCursor; });
+                            if (path != document.EditableShapePaths().end() && !path->points.empty() &&
+                                static_cast<std::size_t>(shapePlaceAtCursor) < document.Objects().size() &&
+                                !document.Objects()[static_cast<std::size_t>(shapePlaceAtCursor)].proxyClone &&
+                                !sceneRenderer.IsObjectLocked(shapePlaceAtCursor))
+                            {
+                                const auto &owner = document.Objects()[static_cast<std::size_t>(shapePlaceAtCursor)];
+                                glm::mat4 parent(1.0f);
+                                if (owner.parentIndex >= 0 && static_cast<std::size_t>(owner.parentIndex) < document.Objects().size())
+                                    parent = sceneRenderer.ResolvedObjectTransform(owner.parentIndex);
+                                const float determinant = glm::determinant(parent);
+                                if (std::isfinite(determinant) && std::abs(determinant) > 0.000001f)
+                                {
+                                    const auto pivot = ShapeEditing::Pivot(*path, shapePivotMode, selectedShapePoint);
+                                    const glm::vec3 current(parent * glm::vec4(pivot, 1.0f));
+                                    const auto localDelta = glm::inverse(parent) *
+                                        glm::translate(glm::mat4(1.0f), bestPoint - current) * parent;
+                                    if (ShapeEditing::Transform(*path, localDelta))
+                                    {
+                                        shapePlacementChangedThisFrame = true;
+                                        sceneRenderer.EmitterPreview().RestartAll();
+                                        status = "Placed the complete SHAPE at the cursor surface hit.";
+                                    }
+                                    else status = "SHAPE placement rejected: values must remain finite.";
+                                }
+                                else status = "Cannot place SHAPE: its parent transform is singular.";
+                            }
+                            else status = "SHAPE placement target is unavailable, locked, or linked to a PROXY source.";
+                            shapePlaceAtCursor = -1;
+                        }
+                        else if (shapeDrawMode && shapeDrawWorldPoints.size() < 255)
                         {
                             shapeDrawWorldPoints.push_back({bestPoint.x, bestPoint.y, bestPoint.z});
                             status = "SHAPE point " + std::to_string(shapeDrawWorldPoints.size()) + " added.";
@@ -44563,7 +45419,7 @@ int RunEditorApplication()
                         }
                     }
                     else
-                        status = shapeDrawMode ? "SHAPE drawing needs collision under the cursor."
+                        status = shapeDrawMode || shapePlaceAtCursor >= 0 ? "SHAPE placement needs gameplay collision under the cursor."
                                                : "PATHZONE drawing needs a collision surface under the cursor.";
                 }
                 std::int32_t volumeHitObject = -1;
@@ -44839,7 +45695,7 @@ int RunEditorApplication()
         if (!tnCameraPreviewRunning)
             camera.Update(window,
                           viewportHovered && activeGizmoAxis < 0 && shapeDragObject < 0 && emitterCurveDragObject < 0 &&
-                              !shapeDrawMode && !pathZoneDrawMode && cameraPreviewObjectIndex < 0,
+                              !shapeDrawMode && shapePlaceAtCursor < 0 && !pathZoneDrawMode && cameraPreviewObjectIndex < 0,
                           std::min(deltaSeconds, 0.1f));
         ImGui::SetCursorScreenPos(ImVec2(viewportOrigin.x + 12.0f, viewportOrigin.y + 12.0f));
         ImGui::Text(
@@ -45126,9 +45982,11 @@ int RunEditorApplication()
 
         currentFramePerformance.viewportAndToolsMs = (glfwGetTime() - viewportAndToolsStart) * 1000.0;
         const double postUiStart = glfwGetTime();
-        ImGui::SetNextWindowPos(ImVec2(0.0f, framebufferHeight - statusHeight));
-        ImGui::SetNextWindowSize(ImVec2(static_cast<float>(framebufferWidth), statusHeight));
-        ImGui::Begin("Status", nullptr, panelFlags | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
+        const auto *statusViewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(statusViewport->Pos.x, statusViewport->Pos.y + statusViewport->Size.y - statusHeight));
+        ImGui::SetNextWindowSize(ImVec2(statusViewport->Size.x, statusHeight));
+        ImGui::Begin("Status", nullptr, panelFlags | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking);
         ImGui::TextUnformatted(status.c_str());
         if (document.IsOpen())
         {
@@ -45181,7 +46039,8 @@ int RunEditorApplication()
             // data. Never walk collision/resource state merely because a JT or
             // another large hierarchy remains selected.
             const bool authoredViewportInteraction =
-                activeGizmoAxis >= 0 || shapeDragObject >= 0 || emitterCurveDragObject >= 0 || jmtRadiusDragObject >= 0;
+                activeGizmoAxis >= 0 || shapeDragObject >= 0 || emitterCurveDragObject >= 0 || jmtRadiusDragObject >= 0 ||
+                shapePlacementChangedThisFrame;
             // The viewport image is an active ImGui item during camera look,
             // selection and ordinary navigation. Those operations do not
             // author the document, so hashing every object/resource array for
@@ -45260,6 +46119,15 @@ int RunEditorApplication()
         const double imguiDrawStart = glfwGetTime();
         currentFramePerformance.backbufferClearMs = (imguiDrawStart - imguiBackendStart) * 1000.0;
         ImGui_ImplOpenGL3_RenderDrawData(imguiDrawData);
+        if (mcpUi.WantsCapture())
+        {
+            try
+            {
+                auto image = mcpUi.Capture(window); mcpUiRevision = mcpRevision();
+                mcpUi.CompleteCapture(std::move(image), mcpUiRevision);
+            }
+            catch (const std::exception &error) { mcpUi.FailCapture(error.what()); }
+        }
         const ImGui_ImplOpenGL3_RenderTimings imguiTimings = ImGui_ImplOpenGL3_GetLastRenderTimings();
         currentFramePerformance.imguiSetupMs = imguiTimings.setup_ms;
         currentFramePerformance.imguiSetupFixedStateMs = imguiTimings.setup_fixed_state_ms;
@@ -45286,7 +46154,7 @@ int RunEditorApplication()
     {
         std::ofstream preferences(uiPreferencePath, std::ios::trunc);
         if (preferences)
-            preferences << workspacePreset << ' ' << (advancedUi ? 1 : 0) << '\n';
+            preferences << workspacePreset << ' ' << (advancedUi ? 1 : 0) << ' ' << (studioGuidance ? 1 : 0) << '\n';
     }
     sceneRenderer.Shutdown();
     ImGui_ImplOpenGL3_Shutdown();

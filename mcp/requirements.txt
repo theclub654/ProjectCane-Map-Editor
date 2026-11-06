@@ -1,0 +1,2 @@
+# FastMCP v1 API; do not implicitly upgrade to a different major API.
+mcp>=1.28,<2

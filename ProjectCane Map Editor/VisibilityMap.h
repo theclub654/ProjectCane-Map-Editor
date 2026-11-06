@@ -15,6 +15,56 @@ namespace VisibilityMap
 {
 inline constexpr std::uint32_t FallbackMask = 0x0fffffffu;
 
+// Shared authoring operations used by the studio and MCP. These retain retail
+// masks and inherited instance membership; a SUBGLOB has no separate zone mask.
+inline void SingleZone(BrxDocument &document)
+{
+    BrxVisibilityNode root{};
+    root.normal[0] = 1.0f;
+    root.negativeChild = root.positiveChild = -1;
+    root.negativeZoneMask = root.positiveZoneMask = 1u;
+    document.EditableVisibilityNodes().assign(1, root);
+    document.EditableVisibilityOneHopMasks().assign(1, 1u);
+    document.EditableWorldHeader().visibilityZoneCount = 1;
+    document.EditableVisibilityZoneNames().assign(1, "Main map");
+    for (auto &object : document.EditableObjects()) if (object.hasAloPayload) object.zoneMask = 1u;
+    for (auto &glob : document.EditableGlobs())
+    {
+        glob.zoneMask = 1u; glob.hasZoneMask = true; glob.propertyMask |= 0x002u;
+    }
+    document.RebuildRenderPacketsFromGlobs();
+}
+
+inline std::pair<std::size_t, std::size_t> EditMembership(BrxDocument &document,
+    const std::vector<std::int32_t> &objects, const std::vector<std::size_t> &globs, int zone, int operation)
+{
+    if (zone < 0 || zone > 31 || operation < 0 || operation > 2) return {};
+    const auto bit = 1u << zone;
+    const auto change = [&](std::uint32_t mask) { return operation == 0 ? mask | bit : operation == 1 ? mask & ~bit : bit; };
+    std::size_t objectsChanged = 0, modelsChanged = 0;
+    for (const auto index : objects)
+    {
+        if (index < 0 || static_cast<std::size_t>(index) >= document.Objects().size()) continue;
+        auto &object = document.EditableObjects()[index];
+        if (!object.hasAloPayload) continue;
+        object.zoneMask = change(object.zoneMask); ++objectsChanged;
+    }
+    for (std::size_t i = 0; i < document.Globs().size(); ++i)
+    {
+        auto &glob = document.EditableGlobs()[i];
+        if (std::find(objects.begin(), objects.end(), glob.ownerObjectIndex) == objects.end() &&
+            std::find(globs.begin(), globs.end(), i) == globs.end()) continue;
+        const auto *inherited = &glob;
+        for (std::size_t guard = 0; !inherited->hasZoneMask && inherited->instanced &&
+             inherited->sourceRecordIndex < document.Globs().size() && guard < document.Globs().size(); ++guard)
+            inherited = &document.Globs()[inherited->sourceRecordIndex];
+        glob.zoneMask = change(inherited->hasZoneMask ? inherited->zoneMask : 0u);
+        glob.hasZoneMask = true; glob.propertyMask |= 0x002u; ++modelsChanged;
+    }
+    document.RebuildRenderPacketsFromGlobs();
+    return {objectsChanged, modelsChanged};
+}
+
 struct Result
 {
     std::uint32_t mask = 0u;

@@ -1992,7 +1992,11 @@ bool EditorProject::Load(const std::filesystem::path &path, BrxDocument &documen
         header.visibilityNodeCount = static_cast<std::uint32_t>(document.VisibilityNodes().size());
         header.visibilityZoneCount = static_cast<std::uint16_t>(document.VisibilityOneHopMasks().size());
     }
-    document.RebuildRenderPacketsFromGlobs();
+    if (!document.RebuildProjectRenderGeometry())
+    {
+        error = "The editor project contains invalid source geometry or pose data; render caches could not be rebuilt.";
+        return false;
+    }
     return true;
 }
 

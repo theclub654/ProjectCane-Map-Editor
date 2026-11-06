@@ -8,6 +8,22 @@ A desktop editor for ProjectCane's native BRX maps, with a 3D viewport, object h
 
 The editor uses ProjectCane's reference source to guide native file layouts and object behavior. Its goal is to make map editing more accessible while preserving the representation expected by the game.
 
+## Finding your way around
+
+Start with **Help > Getting Started** for a step-by-step first edit. Use the top menus to open specialist tools.
+
+**AI / MCP:** optional local MCP integration exposes live records, all 148 CID schemas, source evidence, native operation previews, imports/exports and Undo/Redo. An opt-in image/input path operates existing specialist UI controls. See [setup](MCP.md) and [feature coverage](MCP-Coverage.md). Enable it under **Help > AI / MCP Connection** in a build containing the integration.
+
+- **Scene** on the left lists the level's objects. Search by name, type, or object ID; right-click an entry for hierarchy actions.
+- **Inspector** on the right shows the selection and whether you are editing an object, model, or model part. Use **Select owning object** to leave model selection. Advanced controls remain available.
+- **Docking:** drag the Inspector title/tab to a docking target to place it on another side, tab it with a panel, or leave it floating inside the editor. Resize dock boundaries or floating window edges. ImGui saves the layout in `imgui.ini`; **View > Reset Layout** restores Scene left, Viewport center and Inspector right. Separate OS windows are not enabled.
+- **Object setup** explains each CID's purpose, next step, cautions and source reference. Technical class names and IDs remain visible.
+- **Find related objects & references** navigates parents, children, authored reference candidates and shared Splice indices. Candidates are not certified runtime bindings.
+- **Tools for this object** opens relevant existing studios and Inspector pages. In object-specific settings, search includes inherited fields; **Include inherited settings** shows them without a search.
+- **File > Save Editor Project** preserves your editing session. **File > Export rebuilt edited PCBRX** writes the playable level output. A saved editor project or exported GLB is not a playable level replacement.
+
+Selecting an object focuses its hierarchy on the left; clear selection to return to the world tree. Friendly labels and guidance do not change native IDs, property tokens or file layouts. Existing custom object names are preserved.
+
 ## Features
 
 - Browse and edit map objects through the viewport, hierarchy, and Inspector.

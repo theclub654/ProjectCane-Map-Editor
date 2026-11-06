@@ -56,10 +56,10 @@ void ApplyEditorStyle()
     const ImVec4 raisedHover(0.105f, 0.126f, 0.158f, 1.0f);
     const ImVec4 border(0.145f, 0.169f, 0.205f, 0.82f);
     const ImVec4 text(0.875f, 0.900f, 0.930f, 1.0f);
-    const ImVec4 textMuted(0.475f, 0.525f, 0.590f, 1.0f);
-    const ImVec4 accent(0.145f, 0.500f, 0.920f, 1.0f);
-    const ImVec4 accentHover(0.205f, 0.590f, 1.000f, 1.0f);
-    const ImVec4 accentActive(0.105f, 0.410f, 0.805f, 1.0f);
+    const ImVec4 textMuted(0.60f, 0.65f, 0.71f, 1.0f);
+    const ImVec4 accent(0.10f, 0.63f, 0.70f, 1.0f);
+    const ImVec4 accentHover(0.20f, 0.77f, 0.82f, 1.0f);
+    const ImVec4 accentActive(0.08f, 0.47f, 0.54f, 1.0f);
 
     ImVec4 *colors = style.Colors;
     colors[ImGuiCol_Text] = text;
@@ -97,7 +97,7 @@ void ApplyEditorStyle()
     colors[ImGuiCol_ResizeGripActive] = accentActive;
     colors[ImGuiCol_Tab] = ImVec4(0.060f, 0.073f, 0.094f, 1.0f);
     colors[ImGuiCol_TabHovered] = ImVec4(accent.x, accent.y, accent.z, 0.72f);
-    colors[ImGuiCol_TabActive] = ImVec4(0.105f, 0.240f, 0.430f, 1.0f);
+    colors[ImGuiCol_TabActive] = ImVec4(0.075f, 0.280f, 0.310f, 1.0f);
     colors[ImGuiCol_TabUnfocused] = ImVec4(0.045f, 0.055f, 0.071f, 1.0f);
     colors[ImGuiCol_TabUnfocusedActive] = ImVec4(0.075f, 0.145f, 0.255f, 1.0f);
     colors[ImGuiCol_TableHeaderBg] = ImVec4(0.070f, 0.085f, 0.108f, 1.0f);
