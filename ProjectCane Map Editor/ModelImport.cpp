@@ -218,6 +218,7 @@ bool ParseObj(const std::filesystem::path &p, const ModelImportOptions &o, std::
         }
     };
     std::vector<glm::vec3> pos, nrm;
+    std::vector<std::array<float, 4>> vertexColors;
     std::vector<glm::vec2> uv;
     std::vector<MeshData> parts(1);
     parts.back().name = p.stem().string();
@@ -242,6 +243,23 @@ bool ParseObj(const std::filesystem::path &p, const ModelImportOptions &o, std::
             glm::vec3 v;
             s >> v.x >> v.y >> v.z;
             pos.push_back(v * o.scale);
+            // Common OBJ vertex-color extension: v x y z r g b [a].
+            // A lone trailing value is homogeneous w, not a color.
+            std::array<float, 4> color{1, 1, 1, 1};
+            float red, green, blue;
+            if (s >> red >> green >> blue)
+            {
+                color = {red, green, blue, 1.0f};
+                float alpha;
+                if (s >> alpha)
+                    color[3] = alpha;
+                if (!std::all_of(color.begin(), color.end(), [](const float value) { return std::isfinite(value); }))
+                {
+                    error = "OBJ contains a non-finite vertex color.";
+                    return false;
+                }
+            }
+            vertexColors.push_back(color);
         }
         else if (tag == "vn")
         {
@@ -327,6 +345,7 @@ bool ParseObj(const std::filesystem::path &p, const ModelImportOptions &o, std::
                     return false;
                 }
                 std::copy(&pos[a].x, &pos[a].x + 3, v.position);
+                std::copy(vertexColors[a].begin(), vertexColors[a].end(), v.color);
                 if (b >= 0 && b < static_cast<int>(uv.size()))
                 {
                     v.uv[0] = uv[b].x;
@@ -404,39 +423,84 @@ bool ParseGlb(const std::filesystem::path &p, const ModelImportOptions &o, std::
         error = "GLB lacks JSON or BIN chunk.";
         return false;
     }
-    auto accessor = [&](int ai, int want, std::vector<float> &values) -> bool
+    auto accessor = [&](int ai, int want, std::vector<float> &values, const bool vertexColor = false) -> bool
     {
-        auto &a = j["accessors"][ai];
-        auto &v = j["bufferViews"][a["bufferView"].get<int>()];
-        int ct = a["componentType"], count = a["count"],
-            components = a["type"] == "VEC3"   ? 3
+        values.clear();
+        if (!j.contains("accessors") || !j["accessors"].is_array() || ai < 0 ||
+            static_cast<std::size_t>(ai) >= j["accessors"].size())
+            return false;
+        const auto &a = j["accessors"][ai];
+        const int viewIndex = a.value("bufferView", -1);
+        if (!j.contains("bufferViews") || !j["bufferViews"].is_array() || viewIndex < 0 ||
+            static_cast<std::size_t>(viewIndex) >= j["bufferViews"].size())
+            return false;
+        const auto &v = j["bufferViews"][viewIndex];
+        const int ct = a.value("componentType", 0),
+            components = a["type"] == "VEC4"   ? 4
+                         : a["type"] == "VEC3" ? 3
                          : a["type"] == "VEC2" ? 2
                                                : 1;
-        if (components != want || ct != 5126)
+        const std::size_t componentSize = ct == 5126 ? 4u : ct == 5123 ? 2u : ct == 5121 ? 1u : 0u;
+        if (components != want || componentSize == 0 ||
+            (ct != 5126 && (!vertexColor || !a.value("normalized", false))) || v.value("buffer", 0) != 0)
             return false;
-        std::size_t off = v.value("byteOffset", 0) + a.value("byteOffset", 0),
-                    stride = v.value("byteStride", components * 4);
-        if (off + stride * (count - 1) + components * 4 > binSize)
+        const std::size_t count = a.value("count", std::size_t{0});
+        const std::size_t viewOffset = v.value("byteOffset", std::size_t{0});
+        const std::size_t viewSize = v.value("byteLength", std::size_t{0});
+        const std::size_t accessorOffset = a.value("byteOffset", std::size_t{0});
+        const std::size_t elementSize = static_cast<std::size_t>(components) * componentSize;
+        const std::size_t stride = v.value("byteStride", elementSize);
+        if (count == 0 || stride < elementSize || viewOffset > binSize || viewSize > binSize - viewOffset ||
+            accessorOffset > viewSize || elementSize > viewSize - accessorOffset ||
+            count - 1 > (viewSize - accessorOffset - elementSize) / stride ||
+            count > values.max_size() / static_cast<std::size_t>(components))
             return false;
-        values.resize(count * components);
-        for (int x = 0; x < count; ++x)
-            std::memcpy(values.data() + x * components, bin + off + x * stride, components * 4);
+        values.resize(count * static_cast<std::size_t>(components));
+        for (std::size_t x = 0; x < count; ++x)
+            for (int component = 0; component < components; ++component)
+            {
+                const auto *source = bin + viewOffset + accessorOffset + x * stride + component * componentSize;
+                const float value = ct == 5126 ? Scalar<float>(source)
+                                    : ct == 5123 ? Scalar<std::uint16_t>(source) / 65535.0f
+                                                 : *source / 255.0f;
+                if (!std::isfinite(value))
+                {
+                    values.clear();
+                    return false;
+                }
+                values[x * static_cast<std::size_t>(components) + component] = value;
+            }
         return true;
     };
     auto indices = [&](int ai, std::vector<std::uint32_t> &values) -> bool
     {
-        auto &a = j["accessors"][ai];
-        auto &v = j["bufferViews"][a["bufferView"].get<int>()];
-        int ct = a["componentType"], count = a["count"];
-        std::size_t sz = ct == 5125   ? 4
+        if (!j.contains("accessors") || !j["accessors"].is_array() || ai < 0 ||
+            static_cast<std::size_t>(ai) >= j["accessors"].size())
+            return false;
+        const auto &a = j["accessors"][ai];
+        const int viewIndex = a.value("bufferView", -1);
+        if (!j.contains("bufferViews") || !j["bufferViews"].is_array() || viewIndex < 0 ||
+            static_cast<std::size_t>(viewIndex) >= j["bufferViews"].size())
+            return false;
+        const auto &v = j["bufferViews"][viewIndex];
+        const int ct = a.value("componentType", 0);
+        const std::size_t count = a.value("count", std::size_t{0});
+        const std::size_t sz = ct == 5125   ? 4
                          : ct == 5123 ? 2
                          : ct == 5121 ? 1
-                                      : 0,
-                    off = v.value("byteOffset", 0) + a.value("byteOffset", 0), stride = v.value("byteStride", sz);
-        if (!sz || off + stride * (count - 1) + sz > binSize)
+                                      : 0;
+        const std::size_t viewOffset = v.value("byteOffset", std::size_t{0});
+        const std::size_t viewSize = v.value("byteLength", std::size_t{0});
+        const std::size_t accessorOffset = a.value("byteOffset", std::size_t{0});
+        const std::size_t stride = v.value("byteStride", sz);
+        if (sz == 0 || count == 0 || stride < sz || a.value("type", "") != "SCALAR" ||
+            v.value("buffer", 0) != 0 || viewOffset > binSize || viewSize > binSize - viewOffset ||
+            accessorOffset > viewSize || sz > viewSize - accessorOffset ||
+            count - 1 > (viewSize - accessorOffset - sz) / stride || count > values.max_size())
             return false;
+        const std::size_t off = viewOffset + accessorOffset;
         values.resize(count);
-        for (int x = 0; x < count; ++x)
+        for (std::size_t x = 0; x < count; ++x)
             values[x] = ct == 5125   ? Scalar<std::uint32_t>(bin + off + x * stride)
                         : ct == 5123 ? Scalar<std::uint16_t>(bin + off + x * stride)
                                      : bin[off + x * stride];
@@ -449,7 +513,7 @@ bool ParseGlb(const std::filesystem::path &p, const ModelImportOptions &o, std::
                 continue;
             MeshData m;
             m.name = j["meshes"][mi].value("name", "GLB Mesh " + std::to_string(mi));
-            std::vector<float> ps, ns, ts;
+            std::vector<float> ps, ns, ts, colors;
             std::vector<std::uint32_t> is;
             if (!accessor(pr["attributes"]["POSITION"], 3, ps))
             {
@@ -461,10 +525,37 @@ bool ParseGlb(const std::filesystem::path &p, const ModelImportOptions &o, std::
                 error = "GLB primitive exceeds 65,535 vertices.";
                 return false;
             }
+            // Preserve the existing fallback for unsupported optional normal/
+            // UV encodings. A failed read must never leave partial attributes.
             if (pr["attributes"].contains("NORMAL"))
                 accessor(pr["attributes"]["NORMAL"], 3, ns);
             if (pr["attributes"].contains("TEXCOORD_0"))
                 accessor(pr["attributes"]["TEXCOORD_0"], 2, ts);
+            if ((!ns.empty() && ns.size() / 3 != ps.size() / 3) ||
+                (!ts.empty() && ts.size() / 2 != ps.size() / 3))
+            {
+                error = "GLB normal/UV count does not match POSITION.";
+                return false;
+            }
+            std::size_t colorComponents = 0;
+            if (pr["attributes"].contains("COLOR_0"))
+            {
+                const int colorAccessor = pr["attributes"]["COLOR_0"].get<int>();
+                if (accessor(colorAccessor, 4, colors, true))
+                    colorComponents = 4;
+                else if (accessor(colorAccessor, 3, colors, true))
+                    colorComponents = 3;
+                else
+                {
+                    error = "GLB COLOR_0 must be float or normalized unsigned-byte/unsigned-short RGB or RGBA.";
+                    return false;
+                }
+                if (colors.size() / colorComponents != ps.size() / 3)
+                {
+                    error = "GLB vertex color count does not match POSITION.";
+                    return false;
+                }
+            }
             if (pr.contains("indices"))
             {
                 if (!indices(pr["indices"], is))
@@ -492,6 +583,9 @@ bool ParseGlb(const std::filesystem::path &p, const ModelImportOptions &o, std::
                     m.vertices[i].uv[0] = ts[i * 2];
                     m.vertices[i].uv[1] = o.flipV ? 1 - ts[i * 2 + 1] : ts[i * 2 + 1];
                 }
+                if (colorComponents != 0)
+                    for (std::size_t channel = 0; channel < colorComponents; ++channel)
+                        m.vertices[i].color[channel] = colors[i * colorComponents + channel];
             }
             for (std::size_t i = 0; i + 2 < is.size(); i += 3)
             {

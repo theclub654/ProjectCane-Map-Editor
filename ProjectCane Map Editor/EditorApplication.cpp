@@ -192,15 +192,17 @@ int RunEditorApplication()
     std::vector<ButtonPreviewClip> buttonPreviewClips;
     std::unordered_set<std::int32_t> buttonPreviewHiddenObjects;
     bool showSelectionHighlight = true;
-    float selectionColor[4]{1.0f, 0.0f, 0.0f, 1.0f};
+    float selectionColor[4]{0.15f, 0.8f, 1.0f, 0.22f};
     int fogType = 0;
     bool showCollision = false;
+    bool collisionPickMode = false;
     bool showSelectedObjectCollisionOnly = false;
     bool showGameplayCollision = true;
     bool showCameraCollision = true;
     int collisionColorMode = 0; // 0 geometry kind, 1 camera group, 2 hit-surface group
     std::int32_t selectedCollisionOwner = -1;
     std::int32_t selectedCollisionSurface = -1;
+    std::uint64_t selectedCollisionRevision = 0;
     bool selectedCollisionIsCamera = false;
     std::int32_t collisionCopySource = -1;
     float gameplayCollisionColor[4]{0.12f, 0.86f, 1.0f, 0.72f};
@@ -245,6 +247,11 @@ int RunEditorApplication()
     ImVec2 emitterCurveDragLastMouse{};
     bool shapeDrawMode = false;
     bool shapeDrawCubic = false;
+    std::int32_t volumeShapeOwner = -1;
+    glm::vec3 volumeShapeSize(400.0f);
+    float volumeShapeCenterZ = 0.0f;
+    bool volumeShapeReplace = false;
+    std::vector<std::array<float, 2>> volumeShapeOutline;
     std::int16_t shapeDrawCid = 110;
     std::int32_t shapeDrawParent = -1;
     std::vector<std::array<float, 3>> shapeDrawWorldPoints;
@@ -330,6 +337,20 @@ int RunEditorApplication()
     bool showSpliceTutorial = false;
     bool showObjectOperations = false;
     bool showObjectUseGuide = false;
+    std::int16_t requestedObjectGuideCid = -1;
+    std::int32_t duplicateReviewObject = -1;
+    std::uint64_t duplicateReviewRevision = 0;
+    bool openDuplicateReview = false;
+    std::size_t copyGlobSource = static_cast<std::size_t>(-1);
+    std::int32_t copyGlobTarget = -1;
+    std::uint64_t copyGlobRevision = 0;
+    bool openGlobCopy = false;
+    bool globCopyPreviewReady = false;
+    std::string globCopyPreviewMessage;
+    std::vector<std::int32_t> globCopyDestinations;
+    std::size_t deleteGlobSource = static_cast<std::size_t>(-1);
+    std::uint64_t deleteGlobRevision = 0;
+    bool openGlobDelete = false;
     bool showEditorTutorials = false;
     bool advancedUi = false;
     bool showCommandPalette = false;
@@ -355,6 +376,13 @@ int RunEditorApplication()
     int editorTutorialTopic = 0;
     bool showWorldBuilder = false;
     bool showReferenceLinks = false;
+    bool referenceLensOutgoing = true;
+    bool referenceLensIncoming = true;
+    bool referenceLensInvalid = true;
+    bool referenceLensLabels = true;
+    bool referenceLensFollowPreview = false;
+    int referenceLensLineLimit = 40;
+    ImGuiTextFilter referenceLensFilter;
     std::int32_t pendingDeleteObject = -1;
     bool openDeleteImpact = false;
     bool showSceneWorld = false;
@@ -680,6 +708,9 @@ int RunEditorApplication()
         std::vector<BrxOptionRecord> world;
         BrxWorldHeader worldHeader;
         std::vector<BrxObjectRecord> objects;
+        std::vector<BrxLanguagePayload> languages;
+        std::vector<BrxDialogWaveAsset> dialogWaves;
+        std::vector<std::uint8_t> localizationFooter;
         std::vector<BrxProxyRecord> proxies;
         std::vector<BrxLightRecord> lights;
         std::vector<BrxCameraRecord> cameras;
@@ -1050,6 +1081,46 @@ int RunEditorApplication()
                 hashBytes(value.data(), value.size());
         };
         const auto &worldHeader = document.WorldHeader();
+        const auto defaultLanguage = document.DefaultLanguage();
+        const auto footerSize = document.LocalizationFooter().size();
+        hashBytes(&footerSize, sizeof(footerSize));
+        if (footerSize != 0)
+            hashBytes(document.LocalizationFooter().data(), footerSize);
+        hashBytes(&defaultLanguage, sizeof(defaultLanguage));
+        const auto languageCount = document.Languages().size();
+        hashBytes(&languageCount, sizeof(languageCount));
+        for (const auto &language : document.Languages())
+        {
+            hashBytes(&language.languageId, sizeof(language.languageId));
+            hashBytes(&language.payloadCrc, sizeof(language.payloadCrc));
+            // Opening a language only fills an inspection cache. Dirty state
+            // and Undo track authored edits, not which language was viewed.
+            for (const auto &line : language.subtitles)
+            {
+                if (!line.modified)
+                    continue;
+                hashBytes(&line.objectIndex, sizeof(line.objectIndex));
+                hashBytes(&line.eventIndex, sizeof(line.eventIndex));
+                hashBytes(&line.dialogOid, sizeof(line.dialogOid));
+                hashString(line.subtitle);
+            }
+            for (const auto &voice : language.voiceLines)
+            {
+                if (!voice.modified) continue;
+                hashBytes(&voice.objectIndex, sizeof(voice.objectIndex));
+                hashBytes(&voice.eventIndex, sizeof(voice.eventIndex));
+                hashBytes(&voice.dialogOid, sizeof(voice.dialogOid));
+                hashString(voice.resourceName);
+            }
+        }
+        const auto waveCount = document.DialogWaves().size();
+        hashBytes(&waveCount, sizeof(waveCount));
+        for (const auto &asset : document.DialogWaves())
+        {
+            hashBytes(&asset.languageId, sizeof(asset.languageId));
+            hashBytes(&asset.crc, sizeof(asset.crc));
+            hashString(asset.resourceName);
+        }
         hashString(worldHeader.soundBankFile);
         hashString(worldHeader.commentaryAudioFile);
         hashString(worldHeader.commentarySpeakers);
@@ -1615,6 +1686,9 @@ int RunEditorApplication()
         snapshot.world = document.WorldOptions();
         snapshot.worldHeader = document.WorldHeader();
         snapshot.objects = document.Objects();
+        snapshot.languages = document.Languages();
+        snapshot.dialogWaves = document.DialogWaves();
+        snapshot.localizationFooter = document.LocalizationFooter();
         snapshot.proxies = document.Proxies();
         snapshot.lights = document.Lights();
         snapshot.cameras = document.Cameras();
@@ -1823,6 +1897,9 @@ int RunEditorApplication()
         document.EditableWorldOptions() = snapshot.world;
         document.EditableWorldHeader() = snapshot.worldHeader;
         document.EditableObjects() = snapshot.objects;
+        document.EditableLanguages() = snapshot.languages;
+        document.EditableDialogWaves() = snapshot.dialogWaves;
+        document.RestoreLocalizationFooter(snapshot.localizationFooter);
         document.EditableProxies() = snapshot.proxies;
         document.EditableLights() = snapshot.lights;
         document.EditableCameras() = snapshot.cameras;
@@ -2499,7 +2576,7 @@ int RunEditorApplication()
                 {
                     shapeDrawMode = false;
                     shapeDrawWorldPoints.clear();
-                    status = "Cancelled SHAPE drawing.";
+                    status = shapeDrawCid == -1 ? "Cancelled volume outline drawing." : "Cancelled SHAPE drawing.";
                 }
                 else if (tnCameraPreviewRunning)
                 {
@@ -2625,7 +2702,36 @@ int RunEditorApplication()
             }
             if (shapeDrawMode && ImGui::IsKeyPressed(ImGuiKey_Enter, false))
             {
-                if (shapeDrawWorldPoints.size() > 255)
+                if (shapeDrawCid == -1)
+                {
+                    const auto owner = volumeShapeOwner;
+                    if (owner < 0 || static_cast<std::size_t>(owner) >= document.Objects().size() ||
+                        sceneRenderer.SelectedObjectIndex() != owner || sceneRenderer.IsObjectLocked(owner))
+                        status = "Reselect an unlocked volume before drawing its outline.";
+                    else if (shapeDrawWorldPoints.size() < 3 || shapeDrawWorldPoints.size() > 64)
+                        status = "A volume outline needs 3-64 corners.";
+                    else
+                    {
+                        const glm::mat4 world = glm::make_mat4(document.Objects()[static_cast<std::size_t>(owner)].worldTransform);
+                        const float determinant = glm::determinant(world);
+                        if (!std::isfinite(determinant) || determinant <= 0.000001f)
+                            status = "Volume transform must be invertible and not mirrored.";
+                        else
+                        {
+                            volumeShapeOutline.clear();
+                            const glm::mat4 inverse = glm::inverse(world);
+                            for (const auto &p : shapeDrawWorldPoints)
+                            {
+                                const glm::vec3 local(inverse * glm::vec4(p[0], p[1], p[2], 1.0f));
+                                volumeShapeOutline.push_back({local.x, local.y});
+                            }
+                            shapeDrawMode = false;
+                            shapeDrawWorldPoints.clear();
+                            status = "Outline drafted. Set height/depth in Volume shape, then Apply closed volume.";
+                        }
+                    }
+                }
+                else if (shapeDrawWorldPoints.size() > 255)
                     status = "A SHAPE cannot exceed the BRX U8 limit of 255 control points.";
                 else if (shapeDrawWorldPoints.size() < 2)
                     status = "A SHAPE needs at least two viewport points.";
@@ -2807,8 +2913,13 @@ int RunEditorApplication()
                     std::string error;
                     if (workspace.Compiler().WriteRebuiltPayload(document, workspace.Validation(), destination,
                                                                  error))
+                    {
                         status =
                             "Exported and reopened rebuilt retail payload to " + destination.string() + ".";
+                        if (!document.DialogWaves().empty())
+                            status += " Exported " + std::to_string(document.DialogWaves().size()) +
+                                      " imported voice WAV(s) in the language/Dialogs folders beside it; deploy those with the BRX.";
+                    }
                     else
                         status = "Edited PCBRX rebuild failed: " + error;
                 }
@@ -2847,117 +2958,6 @@ int RunEditorApplication()
                 }
                 if (ImGui::MenuItem("Save Editor Project", "Ctrl+S", false, document.IsOpen()))
                     saveStudioProject();
-                ImGui::SeparatorText("Reusable hierarchies");
-                const std::int32_t hierarchySelection = sceneRenderer.SelectedObjectIndex();
-                if (ImGui::MenuItem("Export selected hierarchy...", nullptr, false, hierarchySelection >= 0))
-                {
-                    const std::string suggested = document.ObjectEditorLabel(hierarchySelection);
-                    const auto path = ChooseHierarchySaveFile(window, suggested);
-                    if (!path.empty())
-                    {
-                        std::string error;
-                        if (EditorProject::SaveHierarchy(path, document, hierarchySelection, error))
-                            status = "Exported hierarchy package to " + path.string() + ".";
-                        else
-                            status = "Hierarchy export failed: " + error;
-                    }
-                }
-                const auto importHierarchy = [&](const std::int32_t parent)
-                {
-                    const auto path = ChooseHierarchyFile(window);
-                    if (path.empty())
-                        return;
-                    std::string error;
-                    std::int32_t imported = -1;
-                    if (EditorProject::LoadHierarchy(path, document, parent, imported, error))
-                    {
-                        workspace.Refresh(document);
-                        sceneRenderer.Upload(document);
-                        sceneRenderer.SelectObject(imported);
-                        status = "Imported hierarchy package " + path.filename().string() + ".";
-                    }
-                    else
-                        status = "Hierarchy import failed: " + error;
-                };
-                if (ImGui::MenuItem("Import hierarchy at world root...", nullptr, false, document.IsOpen()))
-                    importHierarchy(-1);
-                if (ImGui::MenuItem("Import hierarchy under selected...", nullptr, false, hierarchySelection >= 0))
-                    importHierarchy(hierarchySelection);
-                if (ImGui::MenuItem("Replace selected hierarchy...", nullptr, false, hierarchySelection >= 0))
-                {
-                    const auto path = ChooseHierarchyFile(window);
-                    if (!path.empty())
-                    {
-                        std::string error;
-                        std::int32_t replacement = -1;
-                        if (EditorProject::ReplaceHierarchy(path, document, hierarchySelection, replacement, error))
-                        {
-                            workspace.Refresh(document);
-                            sceneRenderer.Upload(document);
-                            sceneRenderer.SelectObject(replacement);
-                            status = "Replaced the selected hierarchy from " + path.filename().string() +
-                                     " while preserving its root identity.";
-                        }
-                        else
-                            status = "Hierarchy replacement failed: " + error;
-                    }
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip(
-                        "Removes the selected object and all descendants, then places the package at the same parent and world transform. The selected root OID is retained.");
-                ImGui::SeparatorText("Portable PROXY definitions");
-                if (ImGui::MenuItem("Export selected PROXY definition...", nullptr, false, hierarchySelection >= 0))
-                {
-                    const std::string suggested = document.ObjectEditorLabel(hierarchySelection) + "_proxy";
-                    const auto path = ChooseHierarchySaveFile(window, suggested);
-                    if (!path.empty())
-                    {
-                        std::string error;
-                        if (EditorProject::SavePortableProxy(path, document, hierarchySelection, error))
-                            status = "Exported portable PROXY definition to " + path.string() + ".";
-                        else
-                            status = "Portable PROXY export failed: " + error;
-                    }
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip(
-                        "Exports a guard or other PROXY instance as a self-contained reusable definition. Linked instances are materialized without changing the open level.");
-                if (ImGui::MenuItem("Import portable PROXY at world root...", nullptr, false, document.IsOpen()))
-                {
-                    const auto path = ChooseHierarchyFile(window);
-                    if (!path.empty())
-                    {
-                        std::string error;
-                        std::int32_t imported = -1;
-                        if (EditorProject::LoadPortableProxy(path, document, -1, imported, error))
-                        {
-                            workspace.Refresh(document);
-                            sceneRenderer.Upload(document);
-                            sceneRenderer.SelectObject(imported);
-                            status = "Imported portable PROXY definition " + path.filename().string() + ".";
-                        }
-                        else
-                            status = "Portable PROXY import failed: " + error;
-                    }
-                }
-                if (ImGui::MenuItem("Import portable PROXY under selected...", nullptr, false, hierarchySelection >= 0))
-                {
-                    const auto path = ChooseHierarchyFile(window);
-                    if (!path.empty())
-                    {
-                        std::string error;
-                        std::int32_t imported = -1;
-                        if (EditorProject::LoadPortableProxy(path, document, hierarchySelection, imported, error))
-                        {
-                            workspace.Refresh(document);
-                            sceneRenderer.Upload(document);
-                            sceneRenderer.SelectObject(imported);
-                            status = "Imported portable PROXY definition under the selected object.";
-                        }
-                        else
-                            status = "Portable PROXY import failed: " + error;
-                    }
-                }
                 ImGui::SeparatorText("Interchange export");
                 if (ImGui::MenuItem("Export Map (GLB)...", nullptr, false, document.IsOpen()))
                 {
@@ -4137,7 +4137,49 @@ int RunEditorApplication()
                             visualizedTzpObjectIndex = result.primaryObjectIndex;
                         }
                     }
-                    if (ImGui::MenuItem("VOLZP damage volume"))
+                    if (ImGui::BeginMenu("Closed volumes - start with a box"))
+                    {
+                        const auto createBoxVolume = [&](int kind)
+                        {
+                            const float *transform = glm::value_ptr(newObjectPlacement);
+                            auto result = kind <= 1
+                                ? EditorDocumentOperations::CreateVolzp(document, selected, transform)
+                                : kind == 2 ? EditorDocumentOperations::CreateVolbtn(document, selected, transform)
+                                : kind == 3 ? EditorDocumentOperations::CreateCamsen(document, selected, transform)
+                                : kind == 4 ? EditorDocumentOperations::CreateWater(document, selected, transform)
+                                : kind == 5 ? EditorDocumentOperations::CreateBarrier(document, selected, transform)
+                                            : EditorDocumentOperations::CreateVolume(document, selected, transform);
+                            if (result.succeeded)
+                            {
+                                const auto shaped = EditorDocumentOperations::SetVolumePrism(document,
+                                    result.primaryObjectIndex, {{-200,-200},{200,-200},{200,200},{-200,200}}, -200, 200);
+                                status = shaped.message;
+                                if (shaped.succeeded && kind == 1)
+                                    for (auto &property : document.EditableObjects()[static_cast<std::size_t>(result.primaryObjectIndex)].properties)
+                                        if (property.eopid == 609)
+                                        { property.intValue = 5; property.modified = true; }
+                                workspace.Refresh(document);
+                                sceneRenderer.Upload(document);
+                                sceneRenderer.SelectObject(result.primaryObjectIndex);
+                                inspectorPage = InspectorPage::Specialized;
+                                if (kind <= 1) visualizedVolzpObjectIndex = result.primaryObjectIndex;
+                                else if (kind == 2) visualizedVolbtnObjectIndex = result.primaryObjectIndex;
+                                else if (kind == 6) visualizedVolumeObjectIndex = result.primaryObjectIndex;
+                                if (shaped.succeeded)
+                                    status = "Created closed box volume. Use Volume shape to resize or draw an outline; configure its behavior below.";
+                            }
+                            else status = result.message;
+                        };
+                        if (ImGui::MenuItem("Electric damage region (VOLZP)")) createBoxVolume(0);
+                        if (ImGui::MenuItem("Pit / falling recovery region (VOLZP)")) createBoxVolume(1);
+                        if (ImGui::MenuItem("Activation region (VOLBTN)")) createBoxVolume(2);
+                        if (ImGui::MenuItem("Camera detection region (CAMSEN)")) createBoxVolume(3);
+                        if (ImGui::MenuItem("Water region (WATER)")) createBoxVolume(4);
+                        if (ImGui::MenuItem("Collision gate (BARRIER)")) createBoxVolume(5);
+                        if (ImGui::MenuItem("Reference / trigger boundary (VOL)")) createBoxVolume(6);
+                        ImGui::EndMenu();
+                    }
+                    if (ImGui::MenuItem("VOLZP damage volume (sphere)"))
                     {
                         const float *transform = glm::value_ptr(newObjectPlacement);
                         const auto result = EditorDocumentOperations::CreateVolzp(document, selected, transform);
@@ -4434,14 +4476,15 @@ int RunEditorApplication()
                 if (ImGui::BeginMenu("Selection highlight"))
                 {
                     ImGui::MenuItem("Enabled", nullptr, &showSelectionHighlight);
-                    ImGui::ColorEdit4("Color", selectionColor,
-                                      ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
-                    if (ImGui::MenuItem("Reset to red"))
+                    ImGui::ColorEdit3("Tint color", selectionColor);
+                    ImGui::SliderFloat("Tint strength", &selectionColor[3], 0.0f, 1.0f, "%.2f");
+                    ImGui::TextDisabled("Lower strength keeps textures and materials visible.");
+                    if (ImGui::MenuItem("Reset to subtle cyan"))
                     {
-                        selectionColor[0] = 1.0f;
-                        selectionColor[1] = 0.0f;
-                        selectionColor[2] = 0.0f;
-                        selectionColor[3] = 1.0f;
+                        selectionColor[0] = 0.15f;
+                        selectionColor[1] = 0.8f;
+                        selectionColor[2] = 1.0f;
+                        selectionColor[3] = 0.22f;
                     }
                     ImGui::EndMenu();
                 }
@@ -4874,7 +4917,9 @@ int RunEditorApplication()
                               workspace, window, camera, gizmoMode, status);
         DrawCreateObjectCatalogPanel(showCreateObjectCatalog, document, workspace, sceneRenderer,
                                      sceneRenderer.SelectedObjectIndex(), status, camera);
-        DrawObjectUseGuidePanel(showObjectUseGuide, workspace, showCreateObjectCatalog, showObjectOperations);
+        DrawObjectUseGuidePanel(showObjectUseGuide, workspace, showCreateObjectCatalog, showObjectOperations,
+                               requestedObjectGuideCid);
+        requestedObjectGuideCid = -1;
         DrawPlacementToolsPanel(showPlacementTools, document, sceneRenderer, gizmoMode, status);
         DrawValidationPanel(showValidationPanel, document, workspace, sceneRenderer, camera, status);
         DrawSpliceEventsPanel(showSpliceEvents, document, workspace, sceneRenderer, status);
@@ -4903,35 +4948,34 @@ int RunEditorApplication()
             lastPropertyFingerprint = lastPropertySnapshot.fingerprint;
             status = "Redid " + label + ".";
         }
+        const auto referenceLensLabel = [&](const auto &reference, const std::int32_t selected)
         {
-            std::vector<std::array<glm::vec3, 2>> referenceLinks;
-            const auto selectedForLinks = sceneRenderer.SelectedObjectIndex();
-            if (showReferenceLinks && selectedForLinks >= 0 &&
-                static_cast<std::size_t>(selectedForLinks) < document.Objects().size())
-            {
-                const auto sourcePosition = glm::vec3(sceneRenderer.ResolvedObjectTransform(selectedForLinks)[3]);
-                for (const auto &reference : workspace.Scene().References())
-                {
-                    if (reference.targetObjectIndex < 0 ||
-                        static_cast<std::size_t>(reference.targetObjectIndex) >= document.Objects().size())
-                        continue;
-                    if (reference.sourceObjectIndex == selectedForLinks)
-                    {
-                        const auto targetPosition =
-                            glm::vec3(sceneRenderer.ResolvedObjectTransform(reference.targetObjectIndex)[3]);
-                        referenceLinks.push_back({sourcePosition, targetPosition});
-                    }
-                    else if (reference.targetObjectIndex == selectedForLinks && reference.sourceObjectIndex >= 0 &&
-                             static_cast<std::size_t>(reference.sourceObjectIndex) < document.Objects().size())
-                    {
-                        const auto referringPosition =
-                            glm::vec3(sceneRenderer.ResolvedObjectTransform(reference.sourceObjectIndex)[3]);
-                        referenceLinks.push_back({referringPosition, sourcePosition});
-                    }
-                }
-            }
-            sceneRenderer.SetEditorReferenceLinks(std::move(referenceLinks));
-        }
+            const bool outgoing = reference.sourceObjectIndex == selected && referenceLensOutgoing;
+            const auto &source = document.Objects()[static_cast<std::size_t>(reference.sourceObjectIndex)];
+            const auto schema = workspace.ObjectTypes().Properties().Describe(source.cid, reference.eopid);
+            const auto other = outgoing ? reference.targetObjectIndex : reference.sourceObjectIndex;
+            const bool validTarget = reference.targetObjectIndex >= 0 &&
+                static_cast<std::size_t>(reference.targetObjectIndex) < document.Objects().size();
+            return std::string(outgoing ? "OUT | " : "IN | ") + schema.displayName + " [" +
+                std::to_string(reference.eopid) + "] | " +
+                (other >= 0 && static_cast<std::size_t>(other) < document.Objects().size()
+                    ? document.ObjectEditorLabel(other) : "OID " + std::to_string(reference.targetOid)) +
+                (!validTarget ? " | unresolved" : !reference.compatible ? " | type mismatch candidate" : "");
+        };
+        const auto referenceLensMatches = [&](const auto &reference, const std::int32_t selected)
+        {
+            if (selected < 0 || static_cast<std::size_t>(selected) >= document.Objects().size() ||
+                reference.sourceObjectIndex < 0 || static_cast<std::size_t>(reference.sourceObjectIndex) >= document.Objects().size())
+                return false;
+            if (!((referenceLensOutgoing && reference.sourceObjectIndex == selected) ||
+                  (referenceLensIncoming && reference.targetObjectIndex == selected))) return false;
+            if (!referenceLensInvalid && (!reference.compatible || reference.targetObjectIndex < 0 ||
+                static_cast<std::size_t>(reference.targetObjectIndex) >= document.Objects().size())) return false;
+            return referenceLensFilter.PassFilter(referenceLensLabel(reference, selected).c_str());
+        };
+        // The lens now draws labeled, directional overlays from this same
+        // resolved list. Do not retain the old undifferentiated line pass.
+        sceneRenderer.SetEditorReferenceLinks({});
         if (showArchitectureStatus)
         {
             ImGui::SetNextWindowSize(ImVec2(520.0f, 420.0f), ImGuiCond_FirstUseEver);
@@ -5212,7 +5256,7 @@ int RunEditorApplication()
                          " has no renderable model hierarchy to frame.";
         };
         DrawDialogManagerPanel(
-            showDialogManager, document, sceneRenderer, status,
+            showDialogManager, document, sceneRenderer, status, window,
             [&](const std::int32_t dialogIndex, const std::int32_t speakerOid, const std::int16_t animationOid,
                 const bool explicitAnimation)
             {
@@ -5368,7 +5412,7 @@ int RunEditorApplication()
         DrawSceneHierarchyPanel(ImVec2(0.0f, menuHeight),
                                 ImVec2(leftWidth, framebufferHeight - menuHeight - statusHeight), panelFlags, document,
                                 workspace.Scene(), sceneRenderer, objectFilter, lastOutlinerObject, status,
-                                hierarchyAction, true);
+                                hierarchyAction, true, window);
         // Apply structural changes only after the panel has released its row
         // references. Refresh the resolved scene before the inspector draws.
         if (hierarchyAction.kind != SceneHierarchyAction::Kind::None && document.IsOpen())
@@ -5376,8 +5420,31 @@ int RunEditorApplication()
             const auto objectIndex = hierarchyAction.objectIndex;
             if (objectIndex < 0 || static_cast<std::size_t>(objectIndex) >= document.Objects().size())
                 status = "The hierarchy object no longer exists.";
+            else if (hierarchyAction.kind == SceneHierarchyAction::Kind::OpenGuide)
+            {
+                requestedObjectGuideCid = document.Objects()[static_cast<std::size_t>(objectIndex)].cid;
+                showObjectUseGuide = true;
+            }
+            else if (hierarchyAction.kind == SceneHierarchyAction::Kind::CopyGlobToObject)
+            {
+                copyGlobSource = hierarchyAction.globIndex;
+                copyGlobRevision = workspace.Scene().Revision();
+                openGlobCopy = true;
+            }
+            else if (hierarchyAction.kind == SceneHierarchyAction::Kind::DeleteGlob)
+            {
+                deleteGlobSource = hierarchyAction.globIndex;
+                deleteGlobRevision = workspace.Scene().Revision();
+                openGlobDelete = true;
+            }
             else if (sceneRenderer.IsObjectLocked(objectIndex))
                 status = "Unlock the object before editing it.";
+            else if (hierarchyAction.kind == SceneHierarchyAction::Kind::ReviewDuplicate)
+            {
+                duplicateReviewObject = objectIndex;
+                duplicateReviewRevision = workspace.Scene().Revision();
+                openDuplicateReview = true;
+            }
             else if (hierarchyAction.kind == SceneHierarchyAction::Kind::DeleteHierarchy)
             {
                 pendingDeleteObject = objectIndex;
@@ -5486,8 +5553,325 @@ int RunEditorApplication()
             }
         }
         currentFramePerformance.hierarchyMs = (glfwGetTime() - hierarchyStart) * 1000.0;
+        if (selectedCollisionRevision != workspace.Scene().Revision())
+        {
+            selectedCollisionOwner = -1;
+            selectedCollisionSurface = -1;
+        }
+
+        if (openDuplicateReview)
+        {
+            ImGui::OpenPopup("Review hierarchy copy");
+            openDuplicateReview = false;
+        }
+        ImGui::SetNextWindowSize(ImVec2(720.0f, 530.0f), ImGuiCond_FirstUseEver);
+        if (ImGui::BeginPopupModal("Review hierarchy copy", nullptr))
+        {
+            const bool valid = document.IsOpen() && duplicateReviewRevision == workspace.Scene().Revision() &&
+                duplicateReviewObject >= 0 &&
+                static_cast<std::size_t>(duplicateReviewObject) < document.Objects().size();
+            if (valid)
+            {
+                std::vector<bool> included(document.Objects().size(), false);
+                std::vector<std::int32_t> members{duplicateReviewObject};
+                included[static_cast<std::size_t>(duplicateReviewObject)] = true;
+                for (std::size_t cursor = 0; cursor < members.size(); ++cursor)
+                    for (const auto child : workspace.Scene().Children(members[cursor]))
+                        if (child >= 0 && static_cast<std::size_t>(child) < included.size() && !included[child])
+                        {
+                            included[child] = true;
+                            members.push_back(child);
+                        }
+                ImGui::TextWrapped("Copy %s and %zu descendant(s)",
+                    document.ObjectEditorLabel(duplicateReviewObject).c_str(), members.size() - 1);
+                ImGui::TextWrapped("The existing duplicate operation allocates new OIDs and remaps supported references inside the copy. References outside it keep their current targets. External objects are not copied automatically.");
+                ImGui::TextWrapped("This lists decoded object-property references, not every Splice lookup or runtime dependency. Check patrol points, home positions, navigation spaces and scripts before testing a guard in game.");
+                ImGui::BeginChild("CopyReferenceList", ImVec2(0.0f, -80.0f), true);
+                std::size_t outgoing = 0;
+                for (const auto &reference : workspace.Scene().References())
+                {
+                    if (reference.sourceObjectIndex < 0 ||
+                        static_cast<std::size_t>(reference.sourceObjectIndex) >= included.size() ||
+                        !included[reference.sourceObjectIndex])
+                        continue;
+                    ++outgoing;
+                    const bool resolved = reference.targetObjectIndex >= 0 &&
+                        static_cast<std::size_t>(reference.targetObjectIndex) < included.size();
+                    const bool internal = resolved && included[reference.targetObjectIndex];
+                    const char *propertyName = PropertyNameForCid(
+                        document.Objects()[static_cast<std::size_t>(reference.sourceObjectIndex)].cid, reference.eopid);
+                    ImGui::TextWrapped("%s | %s (%d) -> OID %d | %s%s",
+                        document.ObjectEditorLabel(reference.sourceObjectIndex).c_str(),
+                        propertyName ? propertyName : "Unknown property", reference.eopid,
+                        reference.targetOid, !resolved ? "unresolved / optional" : internal ? "inside copy" : "shared external target",
+                        resolved && !reference.compatible ? " (incompatible type)" : "");
+                    if (resolved)
+                    {
+                        ImGui::TextWrapped("Target: %s", document.ObjectEditorLabel(reference.targetObjectIndex).c_str());
+                        ImGui::PushID(static_cast<int>(outgoing));
+                        if (ImGui::SmallButton("Inspect target instead"))
+                        {
+                            sceneRenderer.SelectObject(reference.targetObjectIndex);
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::Separator();
+                }
+                if (outgoing == 0)
+                    ImGui::TextWrapped("No decoded outgoing object-property references were found. This does not certify a self-contained gameplay setup.");
+                ImGui::SeparatorText("External objects referring to the original");
+                std::size_t incoming = 0;
+                for (const auto &reference : workspace.Scene().References())
+                    if (reference.sourceObjectIndex >= 0 && reference.targetObjectIndex >= 0 &&
+                        static_cast<std::size_t>(reference.sourceObjectIndex) < included.size() &&
+                        static_cast<std::size_t>(reference.targetObjectIndex) < included.size() &&
+                        !included[reference.sourceObjectIndex] && included[reference.targetObjectIndex])
+                    {
+                        ++incoming;
+                        ImGui::BulletText("%s -> %s (property %d)",
+                            document.ObjectEditorLabel(reference.sourceObjectIndex).c_str(),
+                            document.ObjectEditorLabel(reference.targetObjectIndex).c_str(), reference.eopid);
+                    }
+                if (incoming == 0)
+                    ImGui::TextUnformatted("No decoded incoming property references found.");
+                ImGui::TextWrapped("Existing external references continue to target the original hierarchy, not the new copy.");
+                ImGui::EndChild();
+                ImGui::BeginDisabled(sceneRenderer.IsObjectLocked(duplicateReviewObject));
+                if (ImGui::Button("Duplicate hierarchy"))
+                {
+                    PropertySnapshot before = captureProperties();
+                    const auto result = EditorDocumentOperations::DuplicateHierarchy(document, duplicateReviewObject);
+                    status = result.message;
+                    if (result.succeeded)
+                    {
+                        workspace.Refresh(document);
+                        sceneRenderer.Upload(document);
+                        sceneRenderer.SelectObject(result.primaryObjectIndex);
+                        pushDocumentHistory(std::move(before), "duplicate hierarchy");
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                ImGui::TextWrapped("%s", status.c_str());
+            }
+            else
+                ImGui::TextWrapped("The scene changed after this review opened. Close it and review the hierarchy again before duplicating.");
+            if (ImGui::Button("Close"))
+                ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
 
         const double inspectorStart = glfwGetTime();
+        if (showReferenceLinks)
+        {
+            ImGui::SetNextWindowSize(ImVec2(620.0f, 430.0f), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Reference lens", &showReferenceLinks))
+            {
+                ImGui::Checkbox("Outgoing", &referenceLensOutgoing);
+                ImGui::SameLine(); ImGui::Checkbox("Incoming", &referenceLensIncoming);
+                ImGui::SameLine(); ImGui::Checkbox("Include invalid", &referenceLensInvalid);
+                ImGui::Checkbox("Viewport labels", &referenceLensLabels);
+                ImGui::SameLine(); ImGui::Checkbox("Follow motion previews", &referenceLensFollowPreview);
+                ImGui::SliderInt("Viewport connection limit", &referenceLensLineLimit, 1, 100);
+                referenceLensFilter.Draw("Filter property or object name", -1.0f);
+                ImGui::TextWrapped("Cyan: outgoing. Green: incoming. Dashed amber: type-mismatch candidate. Unresolved references appear in this list without an invented endpoint.");
+                ImGui::TextWrapped("Read-only decoded property references, not every Splice lookup or runtime dependency. Optional nil references and engine-owned targets follow the existing resolver's exclusions.");
+                ImGui::TextWrapped("Click a row to inspect the other object, or Alt-click a viewport connection. Lines are an overlay through geometry. Curve anchors use their first point; non-spatial children use their nearest ALO ancestor when available.");
+                const auto selected = sceneRenderer.SelectedObjectIndex();
+                if (selected >= 0 && static_cast<std::size_t>(selected) < document.Objects().size())
+                {
+                    ImGui::SeparatorText(document.ObjectEditorLabel(selected).c_str());
+                    std::int32_t navigate = -1;
+                    std::size_t matches = 0;
+                    ImGui::BeginChild("ReferenceLensRows", ImVec2(0.0f, 0.0f), true);
+                    const auto &references = workspace.Scene().References();
+                    for (std::size_t index = 0; index < references.size(); ++index)
+                    {
+                        const auto &reference = references[index];
+                        if (!referenceLensMatches(reference, selected)) continue;
+                        ++matches;
+                        const bool outgoing = reference.sourceObjectIndex == selected && referenceLensOutgoing;
+                        const auto other = outgoing ? reference.targetObjectIndex : reference.sourceObjectIndex;
+                        const bool targetExists = reference.targetObjectIndex >= 0 &&
+                            static_cast<std::size_t>(reference.targetObjectIndex) < document.Objects().size();
+                        const ImVec4 color = !targetExists ? ImVec4(1.0f, .4f, .35f, 1.0f)
+                            : !reference.compatible ? ImVec4(1.0f, .75f, .25f, 1.0f)
+                            : outgoing ? ImVec4(.25f, .85f, 1.0f, 1.0f) : ImVec4(.4f, 1.0f, .6f, 1.0f);
+                        ImGui::PushID(static_cast<int>(index));
+                        ImGui::PushStyleColor(ImGuiCol_Text, color);
+                        ImGui::BeginDisabled(other < 0 || static_cast<std::size_t>(other) >= document.Objects().size());
+                        if (ImGui::Selectable(referenceLensLabel(reference, selected).c_str())) navigate = other;
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip("Source object index: %d | property: %d\nAuthored target OID: %d | resolved object index: %d\n%s",
+                                reference.sourceObjectIndex, reference.eopid, reference.targetOid, reference.targetObjectIndex,
+                                !targetExists ? "Unresolved by the editor; no endpoint is inferred."
+                                    : !reference.compatible ? "Candidate has an incompatible type; this is not a valid connection."
+                                    : "Compatible reference from the existing editor resolver.");
+                        ImGui::EndDisabled();
+                        ImGui::PopStyleColor();
+                        ImGui::PopID();
+                    }
+                    if (matches == 0) ImGui::TextWrapped("No decoded references match these filters for this selection.");
+                    ImGui::EndChild();
+                    if (navigate >= 0)
+                    {
+                        sceneRenderer.SelectObject(navigate);
+                        lastOutlinerObject = navigate;
+                        status = "Reference lens: inspecting " + document.ObjectEditorLabel(navigate) + ".";
+                    }
+                }
+                else ImGui::TextWrapped("Select a CID object or one of its GLOBs to see its owning object's references.");
+            }
+            ImGui::End();
+        }
+        if (openGlobCopy)
+        {
+            copyGlobTarget = -1;
+            globCopyPreviewReady = false;
+            globCopyPreviewMessage.clear();
+            globCopyDestinations.clear();
+            std::vector<int> setCounts(document.Objects().size(), 0);
+            for (const auto &set : document.Globsets())
+                if (set.ownerObjectIndex >= 0 && static_cast<std::size_t>(set.ownerObjectIndex) < setCounts.size())
+                    ++setCounts[set.ownerObjectIndex];
+            for (const auto &set : document.Globsets())
+            {
+                const auto owner = set.ownerObjectIndex;
+                if (owner < 0 || static_cast<std::size_t>(owner) >= setCounts.size() || setCounts[owner] != 1 ||
+                    !set.boneOids.empty() || !set.poseWeights.empty()) continue;
+                const auto &object = document.Objects()[owner];
+                if (CidDerivesFrom(object.cid, 2) && object.cid != 108 && object.cid != 109 &&
+                    !object.proxyClone && object.proxyRecordIndex < 0 && object.globPoseCount == 0 &&
+                    copyGlobSource < document.Globs().size() && document.Globs()[copyGlobSource].ownerObjectIndex != owner)
+                    globCopyDestinations.push_back(owner);
+            }
+            ImGui::OpenPopup("Copy GLOB to object");
+            openGlobCopy = false;
+        }
+        ImGui::SetNextWindowSize(ImVec2(660.0f, 540.0f), ImGuiCond_FirstUseEver);
+        if (ImGui::BeginPopupModal("Copy GLOB to object", nullptr))
+        {
+            const bool current = document.IsOpen() && copyGlobSource < document.Globs().size() &&
+                                 copyGlobRevision == workspace.Scene().Revision();
+            if (current)
+            {
+                ImGui::TextWrapped("Copy %s", document.GlobEditorLabel(copyGlobSource).c_str());
+                ImGui::TextWrapped("Creates independent static geometry at the same world position. The original stays in place. Materials/textures stay shared. Collision, scripts and gameplay references are not copied. Destination lighting and visibility rules apply.");
+                ImGui::TextWrapped("Uses authored placement; live animation, motion and camera previews are not baked. Rigged, posed, warped, animated-material and camera-tracking sources are unavailable in this static-copy workflow.");
+                static ImGuiTextFilter destinationFilter;
+                destinationFilter.Draw("Find destination by name, CID or OID", -1.0f);
+                ImGui::BeginChild("GlobCopyDestinations", ImVec2(0.0f, 220.0f), true);
+                for (const auto index : globCopyDestinations)
+                {
+                    const auto &object = document.Objects()[index];
+                    if (!CidDerivesFrom(object.cid, 2) || object.cid == 108 || object.cid == 109 ||
+                        object.proxyClone || object.proxyRecordIndex >= 0)
+                        continue;
+                    const auto label = document.ObjectEditorLabel(static_cast<std::int32_t>(index)) +
+                        " | CID " + std::to_string(object.cid) + " | OID " + std::to_string(object.oid);
+                    if (!destinationFilter.PassFilter(label.c_str())) continue;
+                    ImGui::PushID(static_cast<int>(index));
+                    ImGui::BeginDisabled(sceneRenderer.IsObjectLocked(static_cast<std::int32_t>(index)));
+                    if (ImGui::Selectable(label.c_str(), copyGlobTarget == static_cast<std::int32_t>(index)))
+                    {
+                        copyGlobTarget = static_cast<std::int32_t>(index);
+                        globCopyPreviewReady = false;
+                        globCopyPreviewMessage.clear();
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::PopID();
+                }
+                ImGui::EndChild();
+                const bool targetValid = copyGlobTarget >= 0 &&
+                    static_cast<std::size_t>(copyGlobTarget) < document.Objects().size() &&
+                    !sceneRenderer.IsObjectLocked(copyGlobTarget);
+                ImGui::BeginDisabled(!targetValid);
+                if (ImGui::Button("Preview copy"))
+                {
+                    globCopyPreviewReady = document.PreviewStaticGlobCopy(copyGlobSource, copyGlobTarget, globCopyPreviewMessage);
+                    if (globCopyPreviewReady)
+                        globCopyPreviewMessage = "Ready: append one independent GLOB to " + document.ObjectEditorLabel(copyGlobTarget) +
+                            ". World placement is preserved; existing geometry and collision are retained. No CID object or object OID is created. Owning hierarchy render bounds may expand.";
+                }
+                ImGui::EndDisabled();
+                ImGui::TextWrapped("%s", globCopyPreviewMessage.c_str());
+                ImGui::BeginDisabled(!targetValid || !globCopyPreviewReady);
+                if (ImGui::Button("Apply copy"))
+                {
+                    PropertySnapshot before = captureProperties();
+                    std::string error;
+                    const auto added = document.CopyStaticGlobToObject(copyGlobSource, copyGlobTarget, error);
+                    if (added != static_cast<std::size_t>(-1))
+                    {
+                        const auto group = document.Globs()[added].renderGroup;
+                        workspace.Refresh(document);
+                        sceneRenderer.Upload(document);
+                        sceneRenderer.SelectRenderGroup(group);
+                        pushDocumentHistory(std::move(before), "copy GLOB to object");
+                        status = "Copied GLOB to " + document.ObjectEditorLabel(copyGlobTarget) + " at its original world placement.";
+                        ImGui::CloseCurrentPopup();
+                    }
+                    else
+                    {
+                        globCopyPreviewReady = false;
+                        globCopyPreviewMessage = error;
+                    }
+                }
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+            }
+            else
+                ImGui::TextWrapped("The scene changed. Close this dialog and choose the source GLOB again.");
+            if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        if (openGlobDelete)
+        {
+            ImGui::OpenPopup("Delete GLOB");
+            openGlobDelete = false;
+        }
+        ImGui::SetNextWindowSize(ImVec2(600.0f, 300.0f), ImGuiCond_FirstUseEver);
+        if (ImGui::BeginPopupModal("Delete GLOB", nullptr))
+        {
+            const bool current = document.IsOpen() && deleteGlobSource < document.Globs().size() &&
+                                 deleteGlobRevision == workspace.Scene().Revision();
+            if (current)
+            {
+                const auto &glob = document.Globs()[deleteGlobSource];
+                ImGui::TextWrapped("Delete %s?", document.GlobEditorLabel(deleteGlobSource).c_str());
+                ImGui::TextWrapped("Removes this GLOB and its visual parts from the map and exported BRX. Its CID object, collision geometry, materials and textures remain. Scripts using this visual may need adjustment. Undo restores the deletion.");
+                const bool locked = sceneRenderer.IsObjectLocked(glob.ownerObjectIndex) ||
+                    sceneRenderer.IsGlobLocked(glob.renderGroup) ||
+                    std::any_of(glob.derivedBatches.begin(), glob.derivedBatches.end(), [&](const BrxRenderBatch &batch)
+                        { return sceneRenderer.IsSubglobLocked(glob.renderGroup, batch.firstIndex); });
+                ImGui::BeginDisabled(locked);
+                if (ImGui::Button("Delete GLOB"))
+                {
+                    const auto group = glob.renderGroup;
+                    PropertySnapshot before = captureProperties();
+                    const auto result = EditorDocumentOperations::DeleteGlob(document, deleteGlobSource);
+                    status = result.message;
+                    if (result.succeeded)
+                    {
+                        workspace.Refresh(document);
+                        sceneRenderer.Upload(document);
+                        sceneRenderer.ForgetDeletedGlob(group);
+                        sceneRenderer.SelectObject(result.primaryObjectIndex);
+                        pushDocumentHistory(std::move(before), "delete GLOB");
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+                ImGui::EndDisabled();
+                if (locked) ImGui::TextWrapped("Unlock the owning object, GLOB and its parts before deleting.");
+                ImGui::TextWrapped("%s", status.c_str());
+            }
+            else
+                ImGui::TextWrapped("The scene changed. Cancel and choose the GLOB again.");
+            if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
         if (ImGui::Begin("Inspector", nullptr, panelFlags))
         {
         if (document.IsOpen())
@@ -7799,9 +8183,11 @@ int RunEditorApplication()
                             static_cast<std::size_t>(std::distance(document.EditableGlobs().begin(), selectedGlob));
                         static std::array<char, 96> globNameBuffer{};
                         static std::size_t globNameTarget = static_cast<std::size_t>(-1);
-                        if (globNameTarget != selectedGlobIndex)
+                        static std::uint64_t globNameRevision = 0;
+                        if (globNameTarget != selectedGlobIndex || globNameRevision != workspace.Scene().Revision())
                         {
                             globNameTarget = selectedGlobIndex;
+                            globNameRevision = workspace.Scene().Revision();
                             globNameBuffer.fill('\0');
                             std::copy_n(selectedGlob->editorName.c_str(),
                                         (std::min)(selectedGlob->editorName.size(), globNameBuffer.size() - 1),
@@ -7832,10 +8218,13 @@ int RunEditorApplication()
                                     static std::array<char, 96> subglobNameBuffer{};
                                     static std::size_t subglobNameGlob = static_cast<std::size_t>(-1);
                                     static std::size_t subglobNameTarget = static_cast<std::size_t>(-1);
-                                    if (subglobNameGlob != selectedGlobIndex || subglobNameTarget != subglobIndex)
+                                    static std::uint64_t subglobNameRevision = 0;
+                                    if (subglobNameGlob != selectedGlobIndex || subglobNameTarget != subglobIndex ||
+                                        subglobNameRevision != workspace.Scene().Revision())
                                     {
                                         subglobNameGlob = selectedGlobIndex;
                                         subglobNameTarget = subglobIndex;
+                                        subglobNameRevision = workspace.Scene().Revision();
                                         subglobNameBuffer.fill('\0');
                                         const auto &name = selectedGlob->sourceSubglobs[subglobIndex].editorName;
                                         std::copy_n(name.c_str(), (std::min)(name.size(), subglobNameBuffer.size() - 1),
@@ -7850,11 +8239,70 @@ int RunEditorApplication()
                                 }
                             }
                         }
-                        if (ImGui::Button("Duplicate selected GLOB as instance", ImVec2(-1.0f, 0.0f)))
-                            duplicateGlobAndBeginMove(selectedGlobIndex);
+                        if (ImGui::Button("Copy GLOB to object..."))
+                        {
+                            copyGlobSource = selectedGlobIndex;
+                            copyGlobRevision = workspace.Scene().Revision();
+                            openGlobCopy = true;
+                        }
+                        const bool duplicateSelectedGlobRequested =
+                            ImGui::Button("Duplicate selected GLOB as instance", ImVec2(-1.0f, 0.0f));
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip(
                                 "Create an overlapping instance of the selected GLOB, select it, and activate the Move gizmo.");
+                        if (object.cid == 4)
+                        {
+                            static std::uint32_t removeVisualRenderGroup = 0;
+                            static std::uint64_t removeVisualRevision = 0;
+                            if (ImGui::Button("Remove this MS visual..."))
+                            {
+                                removeVisualRenderGroup = selectedGlob->renderGroup;
+                                removeVisualRevision = workspace.Scene().Revision();
+                                ImGui::OpenPopup("Remove MS visual geometry");
+                            }
+                            if (ImGui::BeginPopupModal("Remove MS visual geometry", nullptr,
+                                                      ImGuiWindowFlags_AlwaysAutoResize))
+                            {
+                                ImGui::TextWrapped("Remove the selected GLOB's visual geometry from exported maps?");
+                                ImGui::TextWrapped("Shared collision and gameplay objects stay in place. This does not make a walkable platform disappear physically. The empty native GLOB slot is retained to preserve other parts' indices. Undo restores the visual.");
+                                const bool visualLocked = sceneRenderer.IsObjectLocked(selectedObjectIndex) ||
+                                    sceneRenderer.IsGlobLocked(selectedGlob->renderGroup) ||
+                                    std::any_of(selectedGlob->derivedBatches.begin(), selectedGlob->derivedBatches.end(),
+                                        [&](const BrxRenderBatch &batch)
+                                        { return sceneRenderer.IsSubglobLocked(selectedGlob->renderGroup, batch.firstIndex); });
+                                const bool visualChanged = removeVisualRenderGroup != selectedGlob->renderGroup ||
+                                    removeVisualRevision != workspace.Scene().Revision();
+                                ImGui::BeginDisabled(visualLocked || visualChanged);
+                                if (ImGui::Button("Remove visual geometry"))
+                                {
+                                    PropertySnapshot before = captureProperties();
+                                    const auto result = EditorDocumentOperations::RemoveMsGlobVisual(document, selectedGlobIndex);
+                                    status = result.message;
+                                    if (result.succeeded)
+                                    {
+                                        workspace.Refresh(document);
+                                        sceneRenderer.ReloadDerivedRenderPackets(document);
+                                        sceneRenderer.SelectObject(selectedObjectIndex);
+                                        pushDocumentHistory(std::move(before), "remove MS visual");
+                                        ImGui::CloseCurrentPopup();
+                                    }
+                                }
+                                ImGui::EndDisabled();
+                                if (visualLocked)
+                                    ImGui::TextWrapped("Unlock the object, GLOB and its model parts before removing this visual.");
+                                if (visualChanged)
+                                    ImGui::TextWrapped("The scene or selected part changed. Cancel and review the visual again before removing it.");
+                                ImGui::SameLine();
+                                if (ImGui::Button("Cancel"))
+                                    ImGui::CloseCurrentPopup();
+                                ImGui::TextWrapped("%s", status.c_str());
+                                ImGui::EndPopup();
+                            }
+                        }
+                        // Duplication can reallocate Globs(); finish using the
+                        // selectedGlob iterator before appending the new part.
+                        if (duplicateSelectedGlobRequested)
+                            duplicateGlobAndBeginMove(selectedGlobIndex);
                     }
                 }
                 const auto inspectorModel =
@@ -7863,6 +8311,70 @@ int RunEditorApplication()
                 if (inspectorPage == InspectorPage::Transform && CidDerivesFrom(object.cid, 110))
                     inspectorPage = InspectorPage::Specialized;
                 DrawObjectSetupCard(object.cid);
+                if (object.cid == 4 && ImGui::CollapsingHeader("MS components - edit individual visual parts"))
+                {
+                    ImGui::TextWrapped("Each GLOB is a visual part, not a child gameplay object. Select a part below to move it, duplicate it or export it with the existing model tools. Model-only edits do not move shared MS collision.");
+                    static ImGuiTextFilter componentFilter;
+                    componentFilter.Draw("Find component", -1.0f);
+                    ImGui::BeginChild("MsComponents", ImVec2(0.0f, 200.0f), true);
+                    for (std::size_t index = 0; index < document.Globs().size(); ++index)
+                    {
+                        const auto &component = document.Globs()[index];
+                        if (component.ownerObjectIndex != selectedObjectIndex)
+                            continue;
+                        const auto label = document.GlobEditorLabel(index);
+                        if (!componentFilter.PassFilter(label.c_str()))
+                            continue;
+                        ImGui::PushID(static_cast<int>(index));
+                        const bool componentUnavailable = component.derivedBatches.empty() ||
+                            sceneRenderer.IsObjectLocked(selectedObjectIndex) ||
+                            sceneRenderer.IsGlobLocked(component.renderGroup);
+                        ImGui::BeginDisabled(componentUnavailable);
+                        if (ImGui::Selectable(label.c_str(), sceneRenderer.HasGlobSelection() &&
+                                              sceneRenderer.SelectedRenderGroup() == component.renderGroup))
+                        {
+                            sceneRenderer.SelectRenderGroup(component.renderGroup);
+                            inspectorPage = InspectorPage::Transform;
+                        }
+                        ImGui::EndDisabled();
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("%zu parts%s", component.derivedBatches.size(), component.instanced ? " | instance" : "");
+                        ImGui::PopID();
+                    }
+                    ImGui::EndChild();
+                    if (ImGui::Button("Isolate selected visual", ImVec2(-1.0f, 0.0f)) && sceneRenderer.HasGlobSelection())
+                        sceneRenderer.IsolateSelection();
+                    if (ImGui::Button("Show all visuals", ImVec2(-1.0f, 0.0f)))
+                        sceneRenderer.ShowAllSelections();
+                }
+                if (ImGui::CollapsingHeader("Collision ownership"))
+                {
+                    const auto visual = sceneRenderer.SelectedBatch();
+                    const auto collisionOwner = visual != nullptr && sceneRenderer.HasGlobSelection()
+                        ? visual->ownerObjectIndex : selectedObjectIndex;
+                    if (collisionOwner >= 0 && static_cast<std::size_t>(collisionOwner) < document.Objects().size())
+                    {
+                        const auto &payload = document.Objects()[static_cast<std::size_t>(collisionOwner)].so;
+                        ImGui::TextWrapped("Native owner: %s", document.ObjectEditorLabel(collisionOwner).c_str());
+                        ImGui::Text("%zu gameplay surfaces | %zu camera surfaces",
+                                    payload.collisionGeometry.surfaces.size(), payload.cameraGeometry.surfaces.size());
+                        ImGui::TextWrapped("Collision is stored on this object. Selecting a visual GLOB does not identify a separate collision mesh for that part. Camera and hit-surface mappings can reference model parts, but they do not establish an automatic parenting relationship.");
+                        if (ImGui::Button("Inspect owner's collision"))
+                        {
+                            sceneRenderer.SelectObject(collisionOwner);
+                            inspectorPage = InspectorPage::CollisionPhysics;
+                            showCollision = true;
+                            showSelectedObjectCollisionOnly = true;
+                        }
+                    }
+                    ImGui::TextWrapped("Use Select collision in the viewport toolbar to pick a face directly and inspect its owning object.");
+                }
+                if (ImGui::SmallButton("Review dependencies and duplicate..."))
+                {
+                    duplicateReviewObject = selectedObjectIndex;
+                    duplicateReviewRevision = workspace.Scene().Revision();
+                    openDuplicateReview = true;
+                }
                 if (DrawObjectRelationships(document, workspace.ObjectTypes(), sceneRenderer, selectedObjectIndex))
                     inspectorPage = inspectorModel.specialized ? InspectorPage::Specialized : InspectorPage::General;
                 if (ImGui::CollapsingHeader("Tools for this object"))
@@ -7906,7 +8418,11 @@ int RunEditorApplication()
                     }
                     if (inspectorModel.animation && ImGui::Button("Animation settings"))
                         inspectorPage = InspectorPage::Animation;
-                    tool("CID Object Guide", showObjectUseGuide);
+                    if (ImGui::Button("Help for this object"))
+                    {
+                        requestedObjectGuideCid = object.cid;
+                        showObjectUseGuide = true;
+                    }
                     tool("Level Validation", showValidationPanel);
                     ImGui::TextWrapped("Opening a tool does not apply a preset, rewrite references or run gameplay scripts.");
                 }
@@ -7999,6 +8515,10 @@ int RunEditorApplication()
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip(
                         "Advanced mode exposes raw properties, EOPIDs and serialized runtime fields. No data is removed in Basic mode.");
+                ImGui::TextDisabled("Double-click a number to type its value.");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "Press Enter to finish editing. Ctrl-click also works. For unchecked source/game defaults, enable the setting's override checkbox first; read-only fields stay locked.");
                 ImGui::SetNextItemWidth(-1.0f);
                 if (ImGui::BeginCombo("##InspectorSection", pageName(inspectorPage)))
                 {
@@ -8261,6 +8781,18 @@ int RunEditorApplication()
                 }
                 if (inspectorPage == InspectorPage::Model)
                 {
+                    // Export is read-only and is also available for linked PROXY models.
+                    for (std::size_t setIndex = 0; setIndex < document.Globsets().size(); ++setIndex)
+                        if (document.Globsets()[setIndex].ownerObjectIndex == selectedObjectIndex)
+                        {
+                            ImGui::PushID("selected-object-model-export");
+                            DrawModelExportButton(document, setIndex, true,
+                                                  document.ObjectEditorLabel(selectedObjectIndex) + "_Model_" +
+                                                      std::to_string(setIndex), window, status);
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("Model group %zu", setIndex);
+                            ImGui::PopID();
+                        }
                     const bool inheritedProxyModel = object.proxyClone;
                     if (inheritedProxyModel)
                     {
@@ -8317,23 +8849,10 @@ int RunEditorApplication()
                         if (ImGui::CollapsingHeader(globsetHeader.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
                         {
                             ImGui::Text("Owner object %d", globset.ownerObjectIndex);
-                            const std::string exportGlobsetLabel =
-                                "Export GLOBSET GLB...##" + std::to_string(globsetIndex);
-                            if (ImGui::SmallButton(exportGlobsetLabel.c_str()))
-                            {
-                                const auto path =
-                                    ChooseNamedGlbSaveFile(nullptr, "GLOBSET_" + std::to_string(globsetIndex));
-                                if (!path.empty())
-                                {
-                                    std::string exportError;
-                                    status = ExportGlobsetGlb(document, globsetIndex, path, exportError)
-                                                 ? "Exported GLOBSET " + std::to_string(globsetIndex) + " to " +
-                                                       path.string() + "."
-                                                 : "GLOBSET export failed: " + exportError;
-                                }
-                            }
+                            DrawModelExportButton(document, globsetIndex, true,
+                                                  "GLOBSET_" + std::to_string(globsetIndex), window, status);
                             ImGui::SameLine();
-                            ImGui::TextDisabled("Exports this model group; skinned groups include their rig.");
+                            ImGui::TextDisabled("Exports this model group without the rest of the map.");
                             if (ImGui::Checkbox("Dynamic relighting", &globset.relight))
                             {
                                 for (const std::size_t globIndex : globset.globIndices)
@@ -8456,20 +8975,8 @@ int RunEditorApplication()
                             if (ImGui::SmallButton("Duplicate as instance"))
                                 duplicateInstanceRequest = globIndex;
                             ImGui::SameLine();
-                            const std::string exportGlobLabel = "Export GLOB GLB...##" + std::to_string(globIndex);
-                            if (ImGui::SmallButton(exportGlobLabel.c_str()))
-                            {
-                                const auto path =
-                                    ChooseNamedGlbSaveFile(nullptr, "GLOB_" + std::to_string(renderGroup));
-                                if (!path.empty())
-                                {
-                                    std::string exportError;
-                                    status = ExportGlobGlb(document, globIndex, path, exportError)
-                                                 ? "Exported GLOB " + std::to_string(renderGroup) + " to " +
-                                                       path.string() + "."
-                                                 : "GLOB export failed: " + exportError;
-                                }
-                            }
+                            DrawModelExportButton(document, globIndex, false, document.GlobEditorLabel(globIndex),
+                                                  window, status);
                             ImGui::SameLine();
                             ImGui::TextDisabled("source%s | mask 0x%04X", glob.modified ? " modified" : "",
                                                 glob.propertyMask);
@@ -12316,14 +12823,16 @@ int RunEditorApplication()
                         [&](const BrxCollisionTriangle &triangle)
                         {
                             return !triangle.cameraGeometry &&
-                                   sceneRenderer.ResolveLogicalOwner(triangle.ownerObjectIndex) == selectedObjectIndex;
+                                   (triangle.ownerObjectIndex == selectedObjectIndex ||
+                                    sceneRenderer.ResolveLogicalOwner(triangle.ownerObjectIndex) == selectedObjectIndex);
                         });
                     const auto cameraCollisionCount = std::count_if(
                         document.CollisionTriangles().begin(), document.CollisionTriangles().end(),
                         [&](const BrxCollisionTriangle &triangle)
                         {
                             return triangle.cameraGeometry &&
-                                   sceneRenderer.ResolveLogicalOwner(triangle.ownerObjectIndex) == selectedObjectIndex;
+                                   (triangle.ownerObjectIndex == selectedObjectIndex ||
+                                    sceneRenderer.ResolveLogicalOwner(triangle.ownerObjectIndex) == selectedObjectIndex);
                         });
                     ImGui::SeparatorText("Collision and physics");
                     if (object.so.present)
@@ -12437,7 +12946,7 @@ int RunEditorApplication()
                     ImGui::Checkbox("Hierarchy bounds and prune sphere", &showSoHierarchyBounds);
                     ImGui::TextDisabled("Ctrl+click a visible collision edge to inspect its surface mapping.");
                     if (selectedCollisionOwner >= 0 && selectedCollisionSurface >= 0 &&
-                        sceneRenderer.ResolveLogicalOwner(selectedCollisionOwner) == selectedObjectIndex)
+                        selectedCollisionOwner == selectedObjectIndex)
                     {
                         ImGui::Text("Selected %s surface: %d", selectedCollisionIsCamera ? "camera" : "gameplay",
                                     selectedCollisionSurface);
@@ -20806,6 +21315,98 @@ int RunEditorApplication()
                         }
                     }
                 }
+                const bool hasPlaneVolume = std::any_of(document.Volumes().begin(), document.Volumes().end(),
+                    [&](const BrxVolumeRecord &v) { return v.ownerObjectIndex == selectedObjectIndex; });
+                const bool hasCollisionVolume = object.so.present && (object.cid == 31 || object.cid == 41 ||
+                    object.cid == 42 || object.cid == 50 || object.cid == 52 || object.cid == 54 || object.cid == 55);
+                if (inspectorPage == InspectorPage::Specialized && (hasPlaneVolume || hasCollisionVolume) &&
+                    ImGui::CollapsingHeader("Volume shape - create or reshape", ImGuiTreeNodeFlags_DefaultOpen))
+                {
+                    if (volumeShapeOwner != selectedObjectIndex)
+                    {
+                        volumeShapeOwner = selectedObjectIndex;
+                        volumeShapeSize = glm::vec3(400.0f);
+                        volumeShapeCenterZ = 0.0f;
+                        volumeShapeOutline.clear();
+                        volumeShapeReplace = false;
+                        if (shapeDrawMode && shapeDrawCid == -1)
+                        { shapeDrawMode = false; shapeDrawWorldPoints.clear(); }
+                    }
+                    ImGui::TextWrapped(hasPlaneVolume
+                        ? "Create a closed trigger boundary. This uses the object's native volume planes."
+                        : "Create a closed collision volume for this object's existing behavior. This changes its boundary, not its damage, events or linked objects.");
+                    ImGui::TextDisabled("Draft first; the current volume stays unchanged until Apply. Dimensions use object-local units.");
+                    ImGui::DragFloat3("Preset width / length / height", glm::value_ptr(volumeShapeSize), 2.0f, 1.0f, 100000.0f);
+                    ImGui::TextDisabled("Width/length are used when drafting a preset; height applies to every outline.");
+                    ImGui::DragFloat("Vertical center", &volumeShapeCenterZ, 2.0f);
+                    if (ImGui::Button("Draft box"))
+                    {
+                        const float x = volumeShapeSize.x * 0.5f, y = volumeShapeSize.y * 0.5f;
+                        volumeShapeOutline = {{-x,-y},{x,-y},{x,y},{-x,y}};
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Draft cylinder"))
+                    {
+                        volumeShapeOutline.clear();
+                        for (int side = 0; side < 12; ++side)
+                        {
+                            const float angle = 6.28318530718f * static_cast<float>(side) / 12.0f;
+                            volumeShapeOutline.push_back({std::cos(angle) * volumeShapeSize.x * 0.5f,
+                                                          std::sin(angle) * volumeShapeSize.y * 0.5f});
+                        }
+                    }
+                    const bool lockedVolume = sceneRenderer.IsObjectLocked(selectedObjectIndex) || object.proxyClone;
+                    ImGui::BeginDisabled(lockedVolume);
+                    if (ImGui::Button("Draw outline in viewport..."))
+                    {
+                        shapeDrawMode = true;
+                        shapeDrawCid = -1;
+                        shapeDrawWorldPoints.clear();
+                        shapePlaceAtCursor = -1;
+                        pathZoneDrawMode = false;
+                        status = "Volume outline: click collision around a convex boundary; Backspace removes a corner, Enter drafts, Esc cancels. Then Apply in the inspector.";
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::TextWrapped("Draw clockwise or counterclockwise around the area. Corners project onto local XY; height and vertical center set the extrusion. Concave areas need separate convex volumes.");
+                    ImGui::Text("Draft: %zu corners | bottom %.1f | top %.1f", volumeShapeOutline.size(),
+                        volumeShapeCenterZ - volumeShapeSize.z * 0.5f, volumeShapeCenterZ + volumeShapeSize.z * 0.5f);
+                    if (ImGui::Button("Clear draft preview"))
+                        volumeShapeOutline.clear();
+                    if (ImGui::TreeNode("Edit draft corners"))
+                    {
+                        for (std::size_t i = 0; i < volumeShapeOutline.size(); ++i)
+                        {
+                            ImGui::PushID(static_cast<int>(i));
+                            ImGui::DragFloat2("XY", volumeShapeOutline[i].data(), 2.0f);
+                            ImGui::PopID();
+                        }
+                        ImGui::TreePop();
+                    }
+                    ImGui::Checkbox("Replace current boundary when applying", &volumeShapeReplace);
+                    ImGui::BeginDisabled(lockedVolume || !volumeShapeReplace || volumeShapeOutline.size() < 3);
+                    if (ImGui::Button("Apply closed volume"))
+                    {
+                        const auto result = EditorDocumentOperations::SetVolumePrism(document, selectedObjectIndex,
+                            volumeShapeOutline, volumeShapeCenterZ - volumeShapeSize.z * 0.5f,
+                            volumeShapeCenterZ + volumeShapeSize.z * 0.5f);
+                        status = result.message;
+                        if (result.succeeded)
+                        {
+                            volumeShapeReplace = false;
+                            workspace.Refresh(document);
+                            sceneRenderer.Upload(document);
+                            if (hasPlaneVolume) visualizedVolumeObjectIndex = selectedObjectIndex;
+                            else if (object.cid == 55) visualizedVolzpObjectIndex = selectedObjectIndex;
+                            else if (object.cid == 41 || object.cid == 42) visualizedVolbtnObjectIndex = selectedObjectIndex;
+                        }
+                    }
+                    ImGui::EndDisabled();
+                    if (!hasPlaneVolume)
+                        ImGui::TextWrapped("Applying replaces gameplay collision and its face mappings, and removes the sphere override. Camera collision and object links are retained.");
+                    if (object.cid == 55)
+                        ImGui::TextWrapped("For a pit: apply the closed volume first, then choose Death surface below. Sly must be falling and fully inside; set recovery targets under Player relocation after damage.");
+                    ImGui::TextDisabled("Move, rotate and scale using Transform. Existing advanced plane/collision controls remain available.");
+                }
                 if (inspectorPage == InspectorPage::Specialized && object.cid == 53)
                 {
                     ImGui::SeparatorText("IKH configuration");
@@ -21049,7 +21650,7 @@ int RunEditorApplication()
                             volzpTestMarkerPosition = camera.Position();
                         }
                         ImGui::TextDisabled(
-                            "Sphere mode is safely editable. Imported collision BSP topology is preserved and treated as read-only geometry.");
+                            "Use Volume shape above to draft a box, cylinder or drawn convex boundary. Apply explicitly replaces the gameplay BSP; sphere radius remains available here.");
                     }
 
                     if (ImGui::CollapsingHeader("Player test", ImGuiTreeNodeFlags_DefaultOpen))
@@ -36633,7 +37234,23 @@ int RunEditorApplication()
         ImGui::SameLine();
         ImGui::Checkbox("Show collision", &showCollision);
         ImGui::SameLine();
+        if (ImGui::Checkbox("Select collision", &collisionPickMode) && collisionPickMode)
+        {
+            showCollision = true;
+            showSelectedObjectCollisionOnly = false;
+            shapeDrawMode = false;
+            shapePlaceAtCursor = -1;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Click a collision face to select its nearest surface and inspect its owner. Turn off to select models again.");
+        if (!showCollision)
+            collisionPickMode = false;
+        ImGui::SameLine();
         ImGui::Checkbox("Gameplay markers", &showGameplayMarkers);
+        ImGui::SameLine();
+        ImGui::Checkbox("Reference lens", &showReferenceLinks);
+        if (collisionPickMode)
+            ImGui::TextColored(ImVec4(1.0f, .8f, .25f, 1.0f), "Collision selection: click a face. Model editing is paused.");
         ImGui::Separator();
         const ImVec2 viewportOrigin = ImGui::GetCursorScreenPos();
         const ImVec2 viewportAvailable = ImGui::GetContentRegionAvail();
@@ -38339,7 +38956,94 @@ int RunEditorApplication()
         ImGui::SetCursorScreenPos(viewportOrigin);
         ImGui::InvisibleButton("ViewportSurface", viewportSize);
         const bool viewportHovered = viewportVisible && ImGui::IsItemHovered();
+        bool referenceLensConsumedMouse = false;
+        if (viewportHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
+            ImGui::OpenPopup("ViewportObjectMenu");
+        // Asset drops must still see ViewportSurface as the last UI item.
         HandleViewportAssetDrop(document, workspace, sceneRenderer, camera, gizmoMode, status);
+        if (ImGui::BeginPopup("ViewportObjectMenu"))
+        {
+            const auto owner = sceneRenderer.SelectedObjectIndex();
+            if (document.IsOpen() && owner >= 0 && static_cast<std::size_t>(owner) < document.Objects().size())
+            {
+                ImGui::TextUnformatted(document.ObjectEditorLabel(owner).c_str());
+                ImGui::Separator();
+                std::vector<std::size_t> exportGlobs;
+                for (std::size_t index = 0; index < document.Globs().size(); ++index)
+                {
+                    const auto &glob = document.Globs()[index];
+                    if (glob.ownerObjectIndex == owner &&
+                        (!sceneRenderer.HasGlobSelection() || glob.renderGroup == sceneRenderer.SelectedRenderGroup()))
+                        exportGlobs.push_back(index);
+                }
+                if (exportGlobs.size() == 1)
+                {
+                    const auto index = exportGlobs.front();
+                    if (ImGui::MenuItem("Copy GLOB to object..."))
+                    {
+                        copyGlobSource = index;
+                        copyGlobRevision = workspace.Scene().Revision();
+                        openGlobCopy = true;
+                    }
+                    DrawModelExportButton(document, index, false, document.GlobEditorLabel(index),
+                                          window, status, "Export GLOB...");
+                    if (ImGui::MenuItem("Delete GLOB..."))
+                    {
+                        deleteGlobSource = index;
+                        deleteGlobRevision = workspace.Scene().Revision();
+                        openGlobDelete = true;
+                    }
+                }
+                else if (!exportGlobs.empty())
+                {
+                    if (ImGui::BeginMenu("Copy GLOB to object..."))
+                    {
+                        for (const auto index : exportGlobs)
+                        {
+                            ImGui::PushID(static_cast<int>(index));
+                            if (ImGui::MenuItem(document.GlobEditorLabel(index).c_str()))
+                            {
+                                copyGlobSource = index;
+                                copyGlobRevision = workspace.Scene().Revision();
+                                openGlobCopy = true;
+                            }
+                            ImGui::PopID();
+                        }
+                        ImGui::EndMenu();
+                    }
+                    if (ImGui::BeginMenu("Export GLOB..."))
+                    {
+                        ImGui::TextDisabled("Choose a visual part of the selected object.");
+                        for (const auto index : exportGlobs)
+                        {
+                            const auto label = document.GlobEditorLabel(index);
+                            DrawModelExportButton(document, index, false, label, window, status, label.c_str());
+                        }
+                        ImGui::EndMenu();
+                    }
+                    if (ImGui::BeginMenu("Delete GLOB..."))
+                    {
+                        for (const auto index : exportGlobs)
+                        {
+                            ImGui::PushID(static_cast<int>(index));
+                            if (ImGui::MenuItem(document.GlobEditorLabel(index).c_str()))
+                            {
+                                deleteGlobSource = index;
+                                deleteGlobRevision = workspace.Scene().Revision();
+                                openGlobDelete = true;
+                            }
+                            ImGui::PopID();
+                        }
+                        ImGui::EndMenu();
+                    }
+                }
+                else
+                    ImGui::TextDisabled("This selection has no GLOB to export.");
+            }
+            else
+                ImGui::TextDisabled("Select an object or GLOB first.");
+            ImGui::EndPopup();
+        }
         struct TnViewportHit
         {
             std::int32_t objectIndex = -1;
@@ -38455,7 +39159,7 @@ int RunEditorApplication()
         const bool selectedJmtMarker = selectedPointIndex >= 0 &&
                                        static_cast<std::size_t>(selectedPointIndex) < document.Objects().size() &&
                                        document.Objects()[static_cast<std::size_t>(selectedPointIndex)].cid == 128;
-        if ((showCollision || showAloHelpers || mrkvShowHelpers || decoyShowHelpers || cameraShowHelpers ||
+        if ((showReferenceLinks || showCollision || showAloHelpers || mrkvShowHelpers || decoyShowHelpers || cameraShowHelpers ||
              tnCameraDisplay.showHelpers || showGameplayMarkers || showPointMarkers || selectedPointMarker ||
              hpntPreviewObjectIndex >= 0 || jmtPreviewObjectIndex >= 0 || showAllJmtMarkers ||
              spirePreviewObjectIndex >= 0 || showAllSpireMarkers || visualizedSggObjectIndex >= 0 ||
@@ -38530,6 +39234,114 @@ int RunEditorApplication()
                                    viewportOrigin.y + (0.5f - ndcEnd.y * 0.5f) * viewportSize.y);
                 return true;
             };
+            if (showReferenceLinks)
+            {
+                const auto selected = sceneRenderer.SelectedObjectIndex();
+                const auto anchor = [&](std::int32_t index, glm::vec3 &position)
+                {
+                    for (std::size_t guard = 0; index >= 0 && static_cast<std::size_t>(index) < document.Objects().size() &&
+                         guard++ < document.Objects().size();)
+                    {
+                        const auto &object = document.Objects()[index];
+                        if (CidDerivesFrom(object.cid, 110))
+                        {
+                            const auto path = std::find_if(document.ShapePaths().begin(), document.ShapePaths().end(),
+                                [index](const BrxShapePathRecord &value) { return value.ownerObjectIndex == index; });
+                            if (path != document.ShapePaths().end() && !path->points.empty())
+                            {
+                                glm::mat4 parent(1.0f);
+                                if (object.parentIndex >= 0 && static_cast<std::size_t>(object.parentIndex) < document.Objects().size())
+                                    parent = referenceLensFollowPreview ? sceneRenderer.PreviewedObjectTransform(object.parentIndex)
+                                                                        : sceneRenderer.ResolvedObjectTransform(object.parentIndex);
+                                position = glm::vec3(parent * glm::vec4(glm::make_vec3(path->points.front().data()), 1.0f));
+                                return std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z);
+                            }
+                        }
+                        if (CidDerivesFrom(object.cid, 2) || CidDerivesFrom(object.cid, 126))
+                        {
+                            position = glm::vec3((referenceLensFollowPreview ? sceneRenderer.PreviewedObjectTransform(index)
+                                                                           : sceneRenderer.ResolvedObjectTransform(index))[3]);
+                            return std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z);
+                        }
+                        index = object.proxyRuntimeParentIndex >= 0 ? object.proxyRuntimeParentIndex : object.parentIndex;
+                    }
+                    return false;
+                };
+                const auto &references = workspace.Scene().References();
+                float bestHit = 64.0f;
+                std::size_t hovered = references.size(), drawn = 0, eligible = 0;
+                const auto mouse = ImGui::GetMousePos();
+                for (std::size_t index = 0; index < references.size(); ++index)
+                {
+                    const auto &reference = references[index];
+                    if (!referenceLensMatches(reference, selected) || reference.targetObjectIndex < 0 ||
+                        static_cast<std::size_t>(reference.targetObjectIndex) >= document.Objects().size()) continue;
+                    ++eligible;
+                    if (drawn >= static_cast<std::size_t>(referenceLensLineLimit)) continue;
+                    glm::vec3 from, to;
+                    ImVec2 a, b;
+                    if (!anchor(reference.sourceObjectIndex, from) || !anchor(reference.targetObjectIndex, to) ||
+                        !projectSegment(from, to, a, b)) continue;
+                    if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(b.x) || !std::isfinite(b.y)) continue;
+                    const bool outgoing = reference.sourceObjectIndex == selected && referenceLensOutgoing;
+                    const ImU32 color = !reference.compatible ? IM_COL32(255, 190, 65, 235)
+                        : outgoing ? IM_COL32(65, 215, 255, 235) : IM_COL32(100, 255, 150, 235);
+                    const ImVec2 delta(b.x-a.x, b.y-a.y);
+                    const float lengthSquared = delta.x*delta.x + delta.y*delta.y;
+                    const float length = std::sqrt(lengthSquared);
+                    if (reference.compatible) overlay->AddLine(a, b, color, 2.0f);
+                    else if (length > 0.0f)
+                        for (float distance = 0.0f; distance < length; distance += 12.0f)
+                        {
+                            const float end = (std::min)(distance + 7.0f, length);
+                            overlay->AddLine(ImVec2(a.x+delta.x*distance/length, a.y+delta.y*distance/length),
+                                ImVec2(a.x+delta.x*end/length, a.y+delta.y*end/length), color, 2.0f);
+                        }
+                    if (length > 12.0f)
+                    {
+                        const ImVec2 direction(delta.x/length, delta.y/length);
+                        overlay->AddTriangleFilled(b, ImVec2(b.x-direction.x*10-direction.y*4, b.y-direction.y*10+direction.x*4),
+                            ImVec2(b.x-direction.x*10+direction.y*4, b.y-direction.y*10-direction.x*4), color);
+                    }
+                    else overlay->AddCircle(a, 6.0f, color, 12, 2.0f);
+                    const float t = lengthSquared > 0.0f ? std::clamp(((mouse.x-a.x)*delta.x+(mouse.y-a.y)*delta.y)/lengthSquared, 0.0f, 1.0f) : 0.0f;
+                    const float dx = mouse.x-(a.x+delta.x*t), dy = mouse.y-(a.y+delta.y*t);
+                    float hit = dx*dx+dy*dy;
+                    if (referenceLensLabels)
+                    {
+                        const auto label = referenceLensLabel(reference, selected);
+                        const auto textSize = ImGui::CalcTextSize(label.c_str());
+                        const ImVec2 p(a.x+delta.x*.5f+8, a.y+delta.y*.5f+8+static_cast<float>(drawn%5)*(textSize.y+3));
+                        overlay->AddRectFilled(ImVec2(p.x-3, p.y-2), ImVec2(p.x+textSize.x+3, p.y+textSize.y+2), IM_COL32(10, 15, 20, 220), 3.0f);
+                        overlay->AddText(p, color, label.c_str());
+                        if (mouse.x >= p.x && mouse.x <= p.x+textSize.x && mouse.y >= p.y && mouse.y <= p.y+textSize.y) hit = 0.0f;
+                    }
+                    if (hit < bestHit) { bestHit = hit; hovered = index; }
+                    ++drawn;
+                }
+                if (viewportHovered && hovered < references.size())
+                {
+                    ImGui::SetTooltip("%s\nAlt-click to inspect the other object. Overlay does not test occlusion.",
+                        referenceLensLabel(references[hovered], selected).c_str());
+                    if (ImGui::GetIO().KeyAlt && !collisionPickMode && !shapeDrawMode && !pathZoneDrawMode &&
+                        shapePlaceAtCursor < 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+                    {
+                        const auto drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                        const auto &reference = references[hovered];
+                        const auto other = reference.sourceObjectIndex == selected ? reference.targetObjectIndex : reference.sourceObjectIndex;
+                        if (drag.x*drag.x+drag.y*drag.y <= 16.0f)
+                        {
+                            sceneRenderer.SelectObject(other);
+                            lastOutlinerObject = other;
+                            referenceLensConsumedMouse = true;
+                            status = "Reference lens: inspecting " + document.ObjectEditorLabel(other) + ".";
+                        }
+                    }
+                }
+                if (eligible > drawn)
+                    overlay->AddText(ImVec2(viewportOrigin.x+8, viewportOrigin.y+65), IM_COL32(255, 210, 90, 255),
+                        ("Reference lens: " + std::to_string(drawn) + " connections drawn; full results in Reference lens panel.").c_str());
+            }
             if (visualizedSggObjectIndex >= 0 &&
                 static_cast<std::size_t>(visualizedSggObjectIndex) < document.Objects().size() &&
                 document.Objects()[static_cast<std::size_t>(visualizedSggObjectIndex)].cid == 137)
@@ -39426,6 +40238,32 @@ int RunEditorApplication()
                                  IM_COL32(120, 255, 180, 255),
                                  "DRAW PATHZONE: click collision | Backspace undo point | Enter create | Esc cancel");
             }
+            if (volumeShapeOwner == sceneRenderer.SelectedObjectIndex() && volumeShapeOwner >= 0 &&
+                static_cast<std::size_t>(volumeShapeOwner) < document.Objects().size() && volumeShapeOutline.size() >= 3)
+            {
+                const glm::mat4 world = glm::make_mat4(document.Objects()[static_cast<std::size_t>(volumeShapeOwner)].worldTransform);
+                const auto corner = [&](std::size_t i, bool upper)
+                {
+                    const auto &p = volumeShapeOutline[i];
+                    return glm::vec3(world * glm::vec4(p[0], p[1], volumeShapeCenterZ +
+                        (upper ? 0.5f : -0.5f) * volumeShapeSize.z, 1.0f));
+                };
+                for (std::size_t i = 0; i < volumeShapeOutline.size(); ++i)
+                {
+                    const auto j = (i + 1) % volumeShapeOutline.size();
+                    for (int layer = 0; layer < 2; ++layer)
+                    {
+                        ImVec2 a, b;
+                        if (projectPoint(corner(i, layer != 0), a) && projectPoint(corner(j, layer != 0), b))
+                            overlay->AddLine(a, b, IM_COL32(255, 200, 65, 240), 2.0f);
+                    }
+                    ImVec2 a, b;
+                    if (projectPoint(corner(i, false), a) && projectPoint(corner(i, true), b))
+                        overlay->AddLine(a, b, IM_COL32(255, 200, 65, 200), 1.5f);
+                }
+                overlay->AddText(ImVec2(viewportOrigin.x + 16.0f, viewportOrigin.y + 102.0f),
+                    IM_COL32(255, 200, 65, 255), "VOLUME DRAFT: preview only until Apply closed volume");
+            }
             if (shapeDrawMode)
             {
                 for (std::size_t pointIndex = 0; pointIndex < shapeDrawWorldPoints.size(); ++pointIndex)
@@ -39449,7 +40287,8 @@ int RunEditorApplication()
                 }
                 overlay->AddText(
                     ImVec2(viewportOrigin.x + 16.0f, viewportOrigin.y + 82.0f), IM_COL32(120, 225, 255, 255),
-                    shapeDrawCubic ? "DRAW CUBIC SHAPE: click collision | Backspace undo | Enter create | Esc cancel"
+                    shapeDrawCid == -1 ? "DRAW VOLUME: click collision | Backspace undo | Enter preview | Esc cancel"
+                    : shapeDrawCubic ? "DRAW CUBIC SHAPE: click collision | Backspace undo | Enter create | Esc cancel"
                                    : "DRAW LINEAR SHAPE: click collision | Backspace undo | Enter create | Esc cancel");
             }
             if (visualizedButtonObjectIndex >= 0 &&
@@ -39927,22 +40766,70 @@ int RunEditorApplication()
             }
             if (showCollision)
             {
-                float nearestCollisionDistance = 8.0f;
+                float nearestCollisionDistance = collisionPickMode ? std::numeric_limits<float>::max() : 8.0f;
                 const bool pickCollision =
-                    viewportHovered && ImGui::GetIO().KeyCtrl && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+                    viewportHovered && (collisionPickMode || ImGui::GetIO().KeyCtrl) &&
+                    ImGui::IsMouseClicked(ImGuiMouseButton_Left);
                 const ImVec2 collisionMouse = ImGui::GetIO().MousePos;
+                glm::vec3 collisionRayOrigin(0.0f), collisionRayDirection(0.0f);
+                float collisionRayLength = 0.0f;
+                if (pickCollision && collisionPickMode)
+                {
+                    const float x = 2.0f * (collisionMouse.x - viewportOrigin.x) / viewportSize.x - 1.0f;
+                    const float y = 1.0f - 2.0f * (collisionMouse.y - viewportOrigin.y) / viewportSize.y;
+                    const auto inverseViewProjection = glm::inverse(
+                        sceneRenderer.ProjectionMatrix(viewportSize.x / viewportSize.y) * camera.ViewMatrix());
+                    const auto nearPoint = inverseViewProjection * glm::vec4(x, y, -1.0f, 1.0f);
+                    const auto farPoint = inverseViewProjection * glm::vec4(x, y, 1.0f, 1.0f);
+                    if (std::abs(nearPoint.w) > 1.0e-8f && std::abs(farPoint.w) > 1.0e-8f)
+                    {
+                        collisionRayOrigin = glm::vec3(nearPoint) / nearPoint.w;
+                        const auto segment = glm::vec3(farPoint) / farPoint.w - collisionRayOrigin;
+                        collisionRayLength = glm::length(segment);
+                        if (std::isfinite(collisionRayLength) && collisionRayLength > 0.0f)
+                            collisionRayDirection = segment / collisionRayLength;
+                    }
+                }
                 std::int32_t pickedCollisionOwner = -1;
                 std::int32_t pickedCollisionSurface = -1;
                 bool pickedCollisionIsCamera = false;
                 for (const auto &triangle : document.CollisionTriangles())
                 {
+                    if (triangle.ownerObjectIndex < 0 ||
+                        static_cast<std::size_t>(triangle.ownerObjectIndex) >= document.Objects().size())
+                        continue;
                     if (triangle.cameraGeometry ? !showCameraCollision : !showGameplayCollision)
                         continue;
                     if (showSelectedObjectCollisionOnly &&
                         (sceneRenderer.SelectedObjectIndex() < 0 ||
-                         sceneRenderer.ResolveLogicalOwner(triangle.ownerObjectIndex) !=
-                             sceneRenderer.SelectedObjectIndex()))
+                         (triangle.ownerObjectIndex != sceneRenderer.SelectedObjectIndex() &&
+                          sceneRenderer.ResolveLogicalOwner(triangle.ownerObjectIndex) !=
+                              sceneRenderer.SelectedObjectIndex())))
                         continue;
+                    if (pickCollision && collisionPickMode && collisionRayLength > 0.0f)
+                    {
+                        const auto a = glm::make_vec3(triangle.positions[0]);
+                        const auto edge1 = glm::make_vec3(triangle.positions[1]) - a;
+                        const auto edge2 = glm::make_vec3(triangle.positions[2]) - a;
+                        const auto p = glm::cross(collisionRayDirection, edge2);
+                        const float determinant = glm::dot(edge1, p);
+                        if (std::abs(determinant) > 1.0e-8f)
+                        {
+                            const auto relative = collisionRayOrigin - a;
+                            const float u = glm::dot(relative, p) / determinant;
+                            const auto q = glm::cross(relative, edge1);
+                            const float v = glm::dot(collisionRayDirection, q) / determinant;
+                            const float distance = glm::dot(edge2, q) / determinant;
+                            if (u >= 0.0f && v >= 0.0f && u + v <= 1.0f && distance >= 0.0f &&
+                                distance <= collisionRayLength && distance < nearestCollisionDistance)
+                            {
+                                nearestCollisionDistance = distance;
+                                pickedCollisionOwner = triangle.ownerObjectIndex;
+                                pickedCollisionSurface = static_cast<std::int32_t>(triangle.surfaceIndex);
+                                pickedCollisionIsCamera = triangle.cameraGeometry;
+                            }
+                        }
+                    }
                     ImVec2 points[3];
                     bool visible = true;
                     for (int vertex = 0; vertex < 3; ++vertex)
@@ -39951,7 +40838,12 @@ int RunEditorApplication()
                                                 points[vertex]);
                     if (!visible)
                         continue;
-                    if (pickCollision)
+                    if (triangle.ownerObjectIndex == selectedCollisionOwner &&
+                        static_cast<std::int32_t>(triangle.surfaceIndex) == selectedCollisionSurface &&
+                        triangle.cameraGeometry == selectedCollisionIsCamera)
+                        for (int edge = 0; edge < 3; ++edge)
+                            overlay->AddLine(points[edge], points[(edge + 1) % 3], IM_COL32(255, 210, 40, 255), 3.0f);
+                    if (pickCollision && !collisionPickMode)
                     {
                         for (int edge = 0; edge < 3; ++edge)
                         {
@@ -39981,11 +40873,14 @@ int RunEditorApplication()
                 if (pickedCollisionOwner >= 0)
                 {
                     selectedCollisionOwner = pickedCollisionOwner;
+                    selectedCollisionRevision = workspace.Scene().Revision();
                     selectedCollisionSurface = pickedCollisionSurface;
                     selectedCollisionIsCamera = pickedCollisionIsCamera;
-                    sceneRenderer.SelectObject(sceneRenderer.ResolveLogicalOwner(pickedCollisionOwner));
+                    sceneRenderer.SelectObject(pickedCollisionOwner);
                     status = std::string("Selected ") + (pickedCollisionIsCamera ? "camera" : "gameplay") +
-                             " collision surface " + std::to_string(pickedCollisionSurface) + ".";
+                             " collision surface " + std::to_string(pickedCollisionSurface) + " owned by " +
+                             document.ObjectEditorLabel(pickedCollisionOwner) + ".";
+                    inspectorPage = InspectorPage::CollisionPhysics;
                 }
                 const std::int32_t selectedIndex = sceneRenderer.SelectedObjectIndex();
                 if (showSelectedGlobBounds &&
@@ -44579,7 +45474,7 @@ int RunEditorApplication()
             overlay->PopClipRect();
         }
         bool markerConsumedMouse = draggingVolzpTestMarker || draggingVolbtnTestMarker || draggingPuffcTestMarker;
-        if (viewportHovered && puffcTestMarkerVisible && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        if (!(showReferenceLinks && ImGui::GetIO().KeyAlt) && !collisionPickMode && viewportHovered && puffcTestMarkerVisible && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
         {
             const ImVec2 mouse = ImGui::GetMousePos();
             const float dx = mouse.x - puffcTestMarkerScreen.x;
@@ -44616,7 +45511,7 @@ int RunEditorApplication()
             }
             markerConsumedMouse = true;
         }
-        if (viewportHovered && volbtnTestMarkerVisible && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        if (!(showReferenceLinks && ImGui::GetIO().KeyAlt) && !collisionPickMode && viewportHovered && volbtnTestMarkerVisible && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
         {
             const ImVec2 mouse = ImGui::GetMousePos();
             const float dx = mouse.x - volbtnTestMarkerScreen.x;
@@ -44653,7 +45548,7 @@ int RunEditorApplication()
             }
             markerConsumedMouse = true;
         }
-        if (viewportHovered && volzpTestMarkerVisible && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        if (!(showReferenceLinks && ImGui::GetIO().KeyAlt) && !collisionPickMode && viewportHovered && volzpTestMarkerVisible && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
         {
             const ImVec2 mouse = ImGui::GetMousePos();
             const float dx = mouse.x - volzpTestMarkerScreen.x;
@@ -44844,7 +45739,7 @@ int RunEditorApplication()
                 overlay->AddCircleFilled(ends[axis], hot ? 6.0f : 4.0f,
                                          hot ? IM_COL32(255, 235, 80, 255) : colors[axis]);
             }
-            if (viewportHovered && hoveredAxis >= 0 && shapePlaceAtCursor < 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            if (!(showReferenceLinks && ImGui::GetIO().KeyAlt) && !collisionPickMode && viewportHovered && hoveredAxis >= 0 && shapePlaceAtCursor < 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
             {
                 activeGizmoAxis = hoveredAxis;
                 gizmoStartTransform = objectTransform;
@@ -45055,7 +45950,7 @@ int RunEditorApplication()
             }
             overlay->PopClipRect();
         }
-        if (viewportHovered && !gizmoConsumedMouse && !shapeDrawMode && shapePlaceAtCursor < 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        if (!(showReferenceLinks && ImGui::GetIO().KeyAlt) && !collisionPickMode && viewportHovered && !gizmoConsumedMouse && !shapeDrawMode && shapePlaceAtCursor < 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
         {
             const ImVec2 mouse = ImGui::GetMousePos();
             float bestDistanceSquared = 100.0f;
@@ -45295,7 +46190,7 @@ int RunEditorApplication()
             shapeDragPoint = -1;
             shapeDragHandle = -1;
         }
-        if (viewportHovered && !gizmoConsumedMouse && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+        if (!referenceLensConsumedMouse && !collisionPickMode && viewportHovered && !gizmoConsumedMouse && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
         {
             const ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
             if (drag.x * drag.x + drag.y * drag.y <= 16.0f)
@@ -45405,13 +46300,15 @@ int RunEditorApplication()
                             else status = "SHAPE placement target is unavailable, locked, or linked to a PROXY source.";
                             shapePlaceAtCursor = -1;
                         }
-                        else if (shapeDrawMode && shapeDrawWorldPoints.size() < 255)
+                        else if (shapeDrawMode && shapeDrawWorldPoints.size() < (shapeDrawCid == -1 ? 64u : 255u))
                         {
                             shapeDrawWorldPoints.push_back({bestPoint.x, bestPoint.y, bestPoint.z});
-                            status = "SHAPE point " + std::to_string(shapeDrawWorldPoints.size()) + " added.";
+                            status = std::string(shapeDrawCid == -1 ? "Volume corner " : "SHAPE point ") +
+                                std::to_string(shapeDrawWorldPoints.size()) + " added.";
                         }
                         else if (shapeDrawMode)
-                            status = "SHAPE drawing has reached the BRX limit of 255 control points.";
+                            status = shapeDrawCid == -1 ? "Volume drawing has reached 64 corners."
+                                : "SHAPE drawing has reached the BRX limit of 255 control points.";
                         else
                         {
                             pathZoneDraft.push_back({bestPoint.x, bestPoint.y, bestPoint.z});

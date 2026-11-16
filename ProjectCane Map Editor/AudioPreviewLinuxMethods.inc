@@ -43,6 +43,7 @@ void AudioPreviewService::Stop()
     open_ = false;
     playingPath_.clear();
     waveform_.clear();
+    CleanupTemporaryWave();
 }
 bool AudioPreviewService::IsPlaying()
 {

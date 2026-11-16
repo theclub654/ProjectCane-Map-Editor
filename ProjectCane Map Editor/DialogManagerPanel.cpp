@@ -4,6 +4,7 @@
 #include "BrxDocument.h"
 #include "EditorOptions.h"
 #include "SceneRenderer.h"
+#include "PlatformDialogs.h"
 
 #include <imgui.h>
 
@@ -11,6 +12,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <utility>
@@ -214,6 +216,7 @@ struct DialogPreviewState
     std::int16_t rightStaging = -1;
     std::int16_t activeSpeaker = -1;
     std::filesystem::path queuedWave;
+    std::shared_ptr<const std::vector<std::uint8_t>> queuedWaveBytes;
     std::string subtitle;
     std::string sandboxEvent;
 };
@@ -224,9 +227,160 @@ void ResetPreview(DialogPreviewState &preview, AudioPreviewService &audio, const
     preview = {};
     preview.objectIndex = objectIndex;
 }
+
+#include "DialogVoicePanel.inc"
+
+bool DrawPalSubtitles(BrxDocument &document, SceneRenderer &renderer, AudioPreviewService &audio,
+                       GLFWwindow *window, std::string &status)
+{
+    if (document.Languages().empty())
+        return false;
+    static std::uint32_t selectedLanguage = 0;
+    static const void *sourceIdentity = nullptr;
+    const void *identity = document.Languages().front().payload.get();
+    if (identity != sourceIdentity ||
+        std::none_of(document.Languages().begin(), document.Languages().end(),
+                     [&](const auto &language) { return language.languageId == selectedLanguage; }))
+    {
+        sourceIdentity = identity;
+        selectedLanguage = document.DefaultLanguage();
+    }
+    const bool expanded = ImGui::CollapsingHeader("PAL dialogue languages (subtitles & voices)", ImGuiTreeNodeFlags_DefaultOpen);
+    audio.SetDialogLanguage(static_cast<std::int32_t>(selectedLanguage));
+    if (!expanded)
+        return selectedLanguage != document.DefaultLanguage();
+    if (ImGui::BeginCombo("Subtitle language", BrxDocument::LanguageName(selectedLanguage)))
+    {
+        for (const auto &language : document.Languages())
+        {
+            const std::string label = std::string(BrxDocument::LanguageName(language.languageId)) +
+                (language.languageId == document.DefaultLanguage() ? " (viewport world)" : "");
+            if (ImGui::Selectable(label.c_str(), selectedLanguage == language.languageId))
+                selectedLanguage = language.languageId;
+        }
+        ImGui::EndCombo();
+    }
+    const bool localized = selectedLanguage != document.DefaultLanguage();
+    audio.SetDialogLanguage(static_cast<std::int32_t>(selectedLanguage));
+    DrawPalVoices(document, renderer, audio, window, selectedLanguage, identity, status);
+    ImGui::TextWrapped("Each language has its own world and dialogue events. Subtitle and voice edits here affect only the chosen language. The viewport and other tools remain on the default world; geometry and timing edits are not copied into other languages.");
+    struct Line
+    {
+        std::uint32_t objectIndex, eventIndex;
+        std::int16_t oid;
+        std::string *text;
+        BrxLocalizedSubtitle *translation;
+    };
+    std::vector<Line> lines;
+    if (localized)
+    {
+        std::string error;
+        if (!document.LoadLanguageSubtitles(selectedLanguage, error))
+        {
+            ImGui::TextWrapped("Cannot inspect this language: %s", error.c_str());
+            return true;
+        }
+        for (auto &language : document.EditableLanguages())
+            if (language.languageId == selectedLanguage)
+                for (auto &line : language.subtitles)
+                    lines.push_back({line.objectIndex, line.eventIndex, line.dialogOid, &line.subtitle, &line});
+    }
+    else
+    {
+        auto &objects = document.EditableObjects();
+        for (std::size_t index = 0; index < objects.size(); ++index)
+        {
+            auto &object = objects[index];
+            if (!object.dialog.present || object.proxyClone)
+                continue;
+            for (std::size_t event = 0; event < object.dialog.events.size(); ++event)
+                if (object.dialog.events[event].kind == BrxDialogEventKind::Talk)
+                    lines.push_back({static_cast<std::uint32_t>(index), static_cast<std::uint32_t>(event),
+                                     object.oid, &object.dialog.events[event].subtitle, nullptr});
+        }
+    }
+    static ImGuiTextFilter filter;
+    filter.Draw("Find subtitle / DIALOG", -1.0f);
+    static std::string selectedKey;
+    const auto keyFor = [&](const Line &line)
+    {
+        return std::to_string(reinterpret_cast<std::uintptr_t>(identity)) + ":" +
+               std::to_string(selectedLanguage) + ":" + std::to_string(line.objectIndex) + ":" +
+               std::to_string(line.eventIndex) + ":" + std::to_string(line.oid);
+    };
+    ImGui::TextDisabled("%zu subtitle line(s)", lines.size());
+    if (ImGui::BeginChild("##palSubtitleList", ImVec2(0, 155), true))
+        for (const auto &line : lines)
+        {
+            auto length = (std::min)(line.text->size(), std::size_t{110});
+            while (length > 0 && length < line.text->size() &&
+                   (static_cast<unsigned char>((*line.text)[length]) & 0xc0u) == 0x80u)
+                --length;
+            std::string snippet = line.text->substr(0, length);
+            std::replace(snippet.begin(), snippet.end(), '\n', ' ');
+            std::replace(snippet.begin(), snippet.end(), '\r', ' ');
+            const std::string description = "DIALOG " + std::to_string(line.oid) + " | object " +
+                std::to_string(line.objectIndex) + " | event " + std::to_string(line.eventIndex + 1) +
+                (line.translation && line.translation->modified ? " * | " : " | ") + snippet;
+            const std::string searchable = description + " " + *line.text;
+            if (!filter.PassFilter(searchable.c_str()))
+                continue;
+            const auto key = keyFor(line);
+            ImGui::PushID(key.c_str());
+            if (ImGui::Selectable(description.c_str(), selectedKey == key))
+                selectedKey = key;
+            ImGui::PopID();
+        }
+    ImGui::EndChild();
+    const auto selected = std::find_if(lines.begin(), lines.end(),
+                                        [&](const auto &line) { return selectedKey == keyFor(line); });
+    if (selected != lines.end())
+    {
+        // ImGui recycles InputText undo state when an ID and text match.
+        // Equal lines in different languages must still have separate state.
+        ImGui::PushID(selectedKey.c_str());
+        static char text[65536]{}; // Native DEK_Talk length is U16 bytes.
+        static std::string bufferKey, bufferValue;
+        if (bufferKey != selectedKey || bufferValue != *selected->text)
+        {
+            bufferKey = selectedKey;
+            bufferValue = *selected->text;
+            const auto size = (std::min)(bufferValue.size(), sizeof(text) - 1);
+            std::memcpy(text, bufferValue.data(), size);
+            text[size] = '\0';
+        }
+        const bool locked = !localized && renderer.IsObjectLocked(static_cast<std::int32_t>(selected->objectIndex));
+        ImGui::BeginDisabled(locked || selected->text->size() > 65535u);
+        if (ImGui::InputTextMultiline("Subtitle text", text, sizeof(text), ImVec2(-1, 110)))
+        {
+            *selected->text = text;
+            bufferValue = text;
+            if (selected->translation)
+                selected->translation->modified = *selected->text != selected->translation->originalSubtitle;
+            else
+            {
+                auto &dialog = document.EditableObjects()[selected->objectIndex].dialog;
+                dialog.modified = dialog.events[selected->eventIndex].modified = true;
+            }
+            status = std::string("Edited ") + BrxDocument::LanguageName(selectedLanguage) + " subtitle.";
+        }
+        if (selected->translation && selected->translation->modified && ImGui::Button("Restore original translation"))
+        {
+            *selected->text = selected->translation->originalSubtitle;
+            selected->translation->modified = false;
+            status = "Restored this language's original subtitle.";
+        }
+        ImGui::EndDisabled();
+        ImGui::TextDisabled("%zu / 65535 bytes. Ctrl+Z / Ctrl+Y: Undo / Redo.", selected->text->size());
+        ImGui::PopID();
+    }
+    ImGui::Separator();
+    return localized;
+}
 }
 
 void DrawDialogManagerPanel(bool &open, BrxDocument &document, SceneRenderer &renderer, std::string &status,
+                            GLFWwindow *window,
                             const DialogLipsyncPreviewRequest &previewLipsync)
 {
     static AudioPreviewService audioPreview;
@@ -234,6 +388,7 @@ void DrawDialogManagerPanel(bool &open, BrxDocument &document, SceneRenderer &re
     audioPreview.SetDocumentPath(document.Path());
     if (!open)
     {
+        audioPreview.Stop();
         if (preview.objectIndex >= 0)
             ResetPreview(preview, audioPreview, -1);
         return;
@@ -244,6 +399,16 @@ void DrawDialogManagerPanel(bool &open, BrxDocument &document, SceneRenderer &re
         ImGui::End();
         return;
     }
+
+    if (DrawPalSubtitles(document, renderer, audioPreview, window, status))
+    {
+        if (preview.objectIndex >= 0)
+            preview = {};
+        ImGui::TextWrapped("Save Editor Project preserves translations and imported WAVs. Export rebuilt edited PCBRX writes all languages and places imported clips in their language/Dialogs folders. Switch back to the viewport language for dialogue timing, speakers and full timeline playback.");
+        ImGui::End();
+        return;
+    }
+    audioPreview.SetDialogLanguage(document.Languages().empty() ? -1 : static_cast<std::int32_t>(document.DefaultLanguage()));
 
     static char search[128]{};
     static int modeFilter = 0;
@@ -447,11 +612,16 @@ void DrawDialogManagerPanel(bool &open, BrxDocument &document, SceneRenderer &re
                 switch (event.kind)
                 {
                 case BrxDialogEventKind::PreloadAudio:
+                {
                     preview.queuedWave = audioPreview.ResolveDialogWave(event.resourceName);
+                    const auto *asset = FindStagedVoice(document, document.DefaultLanguage(), event.resourceName);
+                    preview.queuedWaveBytes = asset != nullptr ? asset->bytes : nullptr;
                     preview.sandboxEvent = preview.queuedWave.empty()
                                                ? "Missing WAV: " + event.resourceName
                                                : "Loaded " + preview.queuedWave.filename().string();
+                    if (preview.queuedWaveBytes) preview.sandboxEvent = "Loaded imported WAV: " + event.resourceName;
                     break;
+                }
                 case BrxDialogEventKind::SpeakerLeft:
                     preview.leftSpeaker = event.primaryOid;
                     preview.leftStaging = event.replacementOid;
@@ -478,14 +648,16 @@ void DrawDialogManagerPanel(bool &open, BrxDocument &document, SceneRenderer &re
                     preview.holdSeconds = event.pauseSeconds >= 0.0f
                                               ? event.pauseSeconds
                                               : std::max(1.0f, static_cast<float>(SubtitleCharacterCount(event.subtitle) + 10u) / 15.0f);
-                    if (!preview.queuedWave.empty())
+                    if (!preview.queuedWave.empty() || preview.queuedWaveBytes)
                     {
                         std::string error;
-                        if (audioPreview.Play(preview.queuedWave, error))
+                        if (preview.queuedWaveBytes ? audioPreview.PlayDialogWaveBytes(*preview.queuedWaveBytes, error)
+                                                    : audioPreview.Play(preview.queuedWave, error))
                             preview.holdSeconds = std::max(preview.holdSeconds, audioPreview.DurationSeconds());
                         else
                             preview.sandboxEvent = error;
                         preview.queuedWave.clear();
+                        preview.queuedWaveBytes.reset();
                     }
                     if (preview.activeSpeaker >= 0 && previewLipsync)
                         previewLipsync(selected, preview.activeSpeaker,
@@ -636,16 +808,20 @@ void DrawDialogManagerPanel(bool &open, BrxDocument &document, SceneRenderer &re
         if (event.kind == BrxDialogEventKind::PreloadAudio)
         {
             const auto wavePath = audioPreview.ResolveDialogWave(event.resourceName);
-            ImGui::BeginDisabled(wavePath.empty());
+            const auto *imported = FindStagedVoice(document, document.DefaultLanguage(), event.resourceName);
+            ImGui::BeginDisabled(wavePath.empty() && imported == nullptr);
             if (ImGui::SmallButton("Play WAV"))
             {
                 std::string error;
-                status = audioPreview.Play(wavePath, error) ? "Playing dialogue WAV: " + wavePath.filename().string()
+                status = (imported ? audioPreview.PlayDialogWaveBytes(*imported->bytes, error) : audioPreview.Play(wavePath, error))
+                             ? "Playing dialogue WAV: " + event.resourceName
                                                             : error;
             }
             ImGui::EndDisabled();
             ImGui::SameLine();
-            if (wavePath.empty())
+            if (imported)
+                ImGui::TextDisabled("Imported WAV saved in project");
+            else if (wavePath.empty())
             {
                 auto expected = std::filesystem::path(event.resourceName);
                 expected.replace_extension(".wav");

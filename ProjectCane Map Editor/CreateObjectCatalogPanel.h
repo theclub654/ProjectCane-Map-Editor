@@ -25,4 +25,4 @@ void DrawCreateObjectCatalogPanel(bool &open, BrxDocument &document, EditorWorks
                                   const EditorCamera &camera);
 
 void DrawObjectUseGuidePanel(bool &open, EditorWorkspace &workspace, bool &openCreateObjectCatalog,
-                             bool &openObjectOperations);
+                             bool &openObjectOperations, std::int16_t requestedCid = -1);

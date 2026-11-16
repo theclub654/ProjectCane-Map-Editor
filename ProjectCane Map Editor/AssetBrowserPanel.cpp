@@ -9,6 +9,7 @@
 #include "PrefabLibrary.h"
 #include "SceneRenderer.h"
 #include "ModelImport.h"
+#include "MapExport.h"
 #include "PlatformDialogs.h"
 #include <imgui.h>
 #include <algorithm>
@@ -171,6 +172,78 @@ std::vector<std::size_t> ShaderUseCounts(const BrxDocument &document)
     }
     return counts;
 }
+}
+
+void DrawModelExportButton(const BrxDocument &document, const std::size_t index, const bool globset,
+                           const std::string &name, GLFWwindow *window, std::string &status,
+                           const char *menuLabel)
+{
+    ImGui::PushID(globset ? "export-model-group" : "export-model-part");
+    ImGui::PushID(static_cast<int>(index));
+    if (menuLabel == nullptr && ImGui::SmallButton("Export model..."))
+        ImGui::OpenPopup("Selected model export");
+    const bool exportOpen = menuLabel != nullptr ? ImGui::BeginMenu(menuLabel)
+                                                 : ImGui::BeginPopup("Selected model export");
+    if (exportOpen)
+    {
+        ImGui::TextUnformatted(name.c_str());
+        ImGui::TextDisabled("%s", globset ? "This model group, including all its GLOBs and model parts."
+                                         : "This GLOB, including all its model parts (SUBGLOBs).");
+        static int format = 0;
+        static bool worldSpace = false;
+        ImGui::Combo("Format", &format, "GLB (textures embedded)\0OBJ + MTL + PNG textures\0");
+        ImGui::Checkbox("Keep world position, rotation and scale", &worldSpace);
+        ImGui::TextUnformatted(worldSpace ? "Placed as it is in the map."
+                                         : "Model-local coordinates: removes this model's map placement.");
+        ImGui::TextUnformatted("Includes geometry, materials and textures. No gameplay or collision.");
+        ImGui::TextUnformatted(format == 0 ? "GLB preserves a model group's rig when present. No animation clips."
+                                          : "OBJ is a static bind-pose mesh; no bones or animation.");
+        if (format == 0)
+            ImGui::TextUnformatted("The editor's static GLB importer does not restore bones or skin weights.");
+        ImGui::TextUnformatted(format == 0 ? "Static reimport: Game scale 1; Flip texture V off."
+                                          : "Reimport: Game scale 1; Flip texture V on. Native game Z-up.");
+        if (format == 1)
+            ImGui::TextUnformatted("Keep the OBJ, matching MTL and PNGs together. Existing companion files are replaced.");
+        if (ImGui::Button("Choose file and export..."))
+        {
+            std::string suggested = name;
+            for (char &c : suggested)
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
+                    c = '_';
+            if (suggested.empty())
+                suggested = "Model";
+            const auto path = ChooseModelSaveFile(window, suggested, format == 1);
+            if (!path.empty())
+            {
+                std::string extension = path.extension().string();
+                std::transform(extension.begin(), extension.end(), extension.begin(),
+                               [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (extension != (format == 1 ? ".obj" : ".glb"))
+                    status = "Model export: use a filename matching the selected format (.obj or .glb).";
+                else
+                {
+                    ModelExportOptions options;
+                    options.format = format == 1 ? ModelExportFormat::Obj : ModelExportFormat::Glb;
+                    options.worldSpace = worldSpace;
+                    std::string error;
+                    const bool exported = globset ? ExportGlobsetModel(document, index, path, options, error)
+                                                  : ExportGlobModel(document, index, path, options, error);
+                    status = exported ? "Exported " + name + " to " + path.string() + "."
+                                      : "Model export failed: " + error;
+                }
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel"))
+            ImGui::CloseCurrentPopup();
+        if (menuLabel != nullptr)
+            ImGui::EndMenu();
+        else
+            ImGui::EndPopup();
+    }
+    ImGui::PopID();
+    ImGui::PopID();
 }
 
 void DrawAssetBrowserPanel(bool &open, BrxDocument &document, SceneRenderer &renderer, AssetDatabase &assets,
@@ -562,6 +635,8 @@ void DrawAssetBrowserPanel(bool &open, BrxDocument &document, SceneRenderer &ren
                     ImGui::PushID(static_cast<int>(asset->stableId));
                     const ImVec2 origin = ImGui::GetCursorScreenPos();
                     ImGui::InvisibleButton("thumbnail", ImVec2(132, 82));
+                    const bool thumbnailClicked = ImGui::IsItemClicked();
+                    const bool thumbnailVisible = ImGui::IsItemVisible();
                     auto *draw = ImGui::GetWindowDrawList();
                     draw->AddRectFilled(origin, ImVec2(origin.x + 132, origin.y + 82), KindColor(kind), 7);
                     if (kind == EditorAssetKind::Texture)
@@ -596,7 +671,7 @@ void DrawAssetBrowserPanel(bool &open, BrxDocument &document, SceneRenderer &ren
                     else if (kind == EditorAssetKind::Model)
                     {
                         const auto thumbnail =
-                            ImGui::IsItemVisible() && asset->sourceIndex >= 0
+                            thumbnailVisible && asset->sourceIndex >= 0
                                 ? renderer.ModelThumbnail(document, static_cast<std::size_t>(asset->sourceIndex),
                                                           asset->stableId, 160)
                                 : 0;
@@ -625,7 +700,7 @@ void DrawAssetBrowserPanel(bool &open, BrxDocument &document, SceneRenderer &ren
                                  (kind == EditorAssetKind::Collision ? " surfaces" : " triangles");
                     if (!detail.empty())
                         draw->AddText(ImVec2(origin.x + 8, origin.y + 56), IM_COL32_WHITE, detail.c_str());
-                    if (ImGui::IsItemClicked())
+                    if (thumbnailClicked)
                     {
                         selectedAsset = asset->stableId;
                         if (asset->ownerObjectIndex >= 0)
@@ -641,6 +716,13 @@ void DrawAssetBrowserPanel(bool &open, BrxDocument &document, SceneRenderer &ren
                         ImGui::SetDragDropPayload("CANE_ASSET", &payload, sizeof(payload));
                         ImGui::Text("Place/apply %s", displayName.c_str());
                         ImGui::EndDragDropSource();
+                    }
+                    if (kind == EditorAssetKind::Model && asset->sourceIndex >= 0 &&
+                        ImGui::BeginPopupContextItem("Model actions"))
+                    {
+                        DrawModelExportButton(document, static_cast<std::size_t>(asset->sourceIndex), true,
+                                              displayName, window, status);
+                        ImGui::EndPopup();
                     }
                     ImGui::TextWrapped("%s", displayName.c_str());
                     ImGui::TextDisabled("ID %016llX", static_cast<unsigned long long>(asset->stableId));
@@ -1233,6 +1315,8 @@ void DrawAssetBrowserPanel(bool &open, BrxDocument &document, SceneRenderer &ren
             const auto &globset = document.Globsets()[static_cast<std::size_t>(selected->sourceIndex)];
             ImGui::Text("Model group %d | %zu GLOB record(s) | %zu bone palette slot(s)", selected->sourceIndex,
                         globset.globIndices.size(), globset.boneOids.size());
+            DrawModelExportButton(document, static_cast<std::size_t>(selected->sourceIndex), true,
+                                  displayNameFor(*selected), window, status);
             for (const auto globIndex : globset.globIndices)
                 if (globIndex < document.Globs().size())
                 {

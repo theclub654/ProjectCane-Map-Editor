@@ -1,6 +1,7 @@
 #include "BrxDocument.h"
 #include "CidAuthoringGuide.h"
 #include "BrxLoader.h"
+#include "EditorOptions.h"
 
 #include <algorithm>
 #include <array>
@@ -187,27 +188,96 @@ bool BrxDocument::OpenReadOnly(const std::filesystem::path &path, std::string &e
     return true;
 }
 
-bool BrxDocument::OpenReadOnlyInPlace(const std::filesystem::path &path, std::string &error)
+bool BrxDocument::OpenPayloadBytes(const std::vector<std::uint8_t> &bytes, std::string &error)
+{
+    BrxDocument replacement;
+    if (!replacement.OpenReadOnlyInPlace("language.pcbrx", error, &bytes))
+        return false;
+    *this = std::move(replacement);
+    return true;
+}
+
+bool BrxDocument::ExtractLocalizationFooter(const std::vector<std::uint8_t> &source,
+                                            std::vector<std::uint8_t> &footer, std::string &error)
+{
+    footer.clear();
+    error.clear();
+    const auto readU32 = [&](const std::size_t offset)
+    {
+        return static_cast<std::uint32_t>(source[offset]) |
+               (static_cast<std::uint32_t>(source[offset + 1]) << 8u) |
+               (static_cast<std::uint32_t>(source[offset + 2]) << 16u) |
+               (static_cast<std::uint32_t>(source[offset + 3]) << 24u);
+    };
+    if (source.size() < 8 || readU32(source.size() - 8) != 0x434f4c50u)
+        return true;
+    const auto size = readU32(source.size() - 4);
+    const auto end = source.size() - 8;
+    if (size > end || size < 4)
+    {
+        error = "The PLOC localization footer has an invalid size.";
+        return false;
+    }
+    const auto begin = end - size;
+    auto cursor = begin;
+    const auto count = readU32(cursor);
+    cursor += 4;
+    if (count > 4096u)
+    {
+        error = "The PLOC localization footer exceeds ProjectCane's string-count limit.";
+        return false;
+    }
+    for (std::uint32_t index = 0; index < count; ++index)
+    {
+        if (end - cursor < 4)
+        {
+            error = "The PLOC localization string table is truncated.";
+            return false;
+        }
+        const auto length = readU32(cursor);
+        cursor += 4;
+        if (length > end - cursor)
+        {
+            error = "A PLOC localization string exceeds its table.";
+            return false;
+        }
+        cursor += length;
+    }
+    if (cursor != end)
+    {
+        error = "The PLOC localization table has unread data.";
+        return false;
+    }
+    footer.assign(source.begin() + static_cast<std::ptrdiff_t>(begin), source.end());
+    return true;
+}
+
+bool BrxDocument::OpenReadOnlyInPlace(const std::filesystem::path &path, std::string &error,
+                                     const std::vector<std::uint8_t> *sourceBytes)
 {
     Close();
     try
     {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file)
-            throw std::runtime_error("Unable to open the selected file");
-
-        const auto end = file.tellg();
-        if (end < 0)
-            throw std::runtime_error("Unable to determine the file size");
-        fileSize_ = static_cast<std::uint64_t>(end);
-        if (fileSize_ < 8 || fileSize_ > std::numeric_limits<std::size_t>::max())
+        std::vector<std::uint8_t> bytes;
+        if (sourceBytes != nullptr)
+            bytes = *sourceBytes;
+        else
+        {
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file)
+                throw std::runtime_error("Unable to open the selected file");
+            const auto end = file.tellg();
+            if (end < 0 || static_cast<std::uint64_t>(end) > std::numeric_limits<std::size_t>::max())
+                throw std::runtime_error("Unable to determine a supported file size");
+            bytes.resize(static_cast<std::size_t>(end));
+            file.seekg(0);
+            file.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+            if (!file)
+                throw std::runtime_error("Unable to read the complete file");
+        }
+        fileSize_ = bytes.size();
+        if (bytes.size() < 8)
             throw std::runtime_error("The file is not a valid PCBRX container");
-
-        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(fileSize_));
-        file.seekg(0);
-        file.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        if (!file)
-            throw std::runtime_error("Unable to read the complete file");
 
         Reader reader(bytes);
         if (reader.U32() != kPcbrMagic)
@@ -217,32 +287,36 @@ bool BrxDocument::OpenReadOnlyInPlace(const std::filesystem::path &path, std::st
         if (version_ != 17 && version_ != 18 && version_ != 19)
             throw std::runtime_error("Unsupported PCBRX version " + std::to_string(version_));
 
-        if (version_ == 19)
+        if (version_ == 18 || version_ == 19)
         {
-            if (reader.U32() != kUnifiedMagic)
-                throw std::runtime_error("PCBRX v19 is missing its PUNI header");
-            if (reader.U32() != 1)
+            const bool unified = version_ == 19;
+            if (reader.U32() != (unified ? kUnifiedMagic : 0x4b484350u))
+                throw std::runtime_error("PCBRX is missing its language-container header");
+            if (unified && reader.U32() != 1)
                 throw std::runtime_error("Unsupported PCBRX v19 schema");
 
             const auto languageCount = reader.U32();
-            defaultLanguage_ = reader.U32();
+            defaultLanguage_ = unified ? reader.U32() : 0;
             chunkCount_ = reader.U32();
-            if (languageCount == 0 || languageCount > 5)
+            if (languageCount == 0 || languageCount > 5 || (!unified && languageCount != 5))
                 throw std::runtime_error("Invalid PCBRX language count");
             if (chunkCount_ > 1'000'000)
                 throw std::runtime_error("Invalid PCBRX chunk count");
 
             languages_.reserve(languageCount);
+            std::uint32_t languageMask = 0;
             for (std::uint32_t i = 0; i < languageCount; ++i)
             {
                 BrxLanguagePayload language;
-                language.languageId = reader.U32();
+                language.languageId = unified ? reader.U32() : i;
                 language.reconstructedSize = reader.U64();
                 const auto referenceCount = reader.U32();
                 // References are an ordered reconstruction recipe and may reuse
                 // a deduplicated chunk, so this count can exceed chunkCount_.
-                if (language.languageId > 4 || referenceCount > reader.Remaining() / sizeof(std::uint32_t))
+                if (language.languageId > 4 || (languageMask & (1u << language.languageId)) != 0 ||
+                    referenceCount == 0 || referenceCount > reader.Remaining() / sizeof(std::uint32_t))
                     throw std::runtime_error("Invalid PCBRX language descriptor");
+                languageMask |= 1u << language.languageId;
                 language.chunkIds.reserve(referenceCount);
                 for (std::uint32_t reference = 0; reference < referenceCount; ++reference)
                 {
@@ -259,11 +333,36 @@ bool BrxDocument::OpenReadOnlyInPlace(const std::filesystem::path &path, std::st
             for (std::uint32_t i = 0; i < chunkCount_; ++i)
             {
                 const auto chunkSize = reader.U32();
-                const auto expectedCrc = reader.U32();
+                const auto expectedCrc = unified ? reader.U32() : 0;
                 auto chunk = reader.Bytes(chunkSize);
-                if (Crc32(chunk) != expectedCrc)
+                if (unified && Crc32(chunk) != expectedCrc)
                     throw std::runtime_error("PCBRX chunk " + std::to_string(i) + " failed CRC validation");
                 chunks.push_back(std::move(chunk));
+            }
+
+            // Preserve every language, not only the one used by the viewport.
+            for (auto &language : languages_)
+            {
+                if (language.reconstructedSize > std::numeric_limits<std::size_t>::max())
+                    throw std::runtime_error("A language payload is too large");
+                auto payload = std::make_shared<std::vector<std::uint8_t>>();
+                payload->reserve(static_cast<std::size_t>(language.reconstructedSize));
+                for (const auto id : language.chunkIds)
+                {
+                    if (payload->size() > language.reconstructedSize ||
+                        chunks[id].size() > language.reconstructedSize - payload->size())
+                        throw std::runtime_error("A language payload exceeds its declared size");
+                    payload->insert(payload->end(), chunks[id].begin(), chunks[id].end());
+                }
+                if (payload->size() != language.reconstructedSize || payload->size() < 8)
+                    throw std::runtime_error("A language payload has an invalid size");
+                std::uint32_t magic{}, version{};
+                std::memcpy(&magic, payload->data(), 4);
+                std::memcpy(&version, payload->data() + 4, 4);
+                if (magic != kPcbrMagic || version != 17)
+                    throw std::runtime_error("A language payload is not PCBRX v17");
+                language.payloadCrc = Crc32(*payload);
+                language.payload = std::move(payload);
             }
 
             const auto selected =
@@ -271,28 +370,7 @@ bool BrxDocument::OpenReadOnlyInPlace(const std::filesystem::path &path, std::st
                              { return language.languageId == defaultLanguage_; });
             if (selected == languages_.end())
                 throw std::runtime_error("The default PCBRX language is missing");
-            if (selected->reconstructedSize > std::numeric_limits<std::size_t>::max())
-                throw std::runtime_error("The reconstructed PCBRX payload is too large");
-
-            payload_.reserve(static_cast<std::size_t>(selected->reconstructedSize));
-            for (const auto chunkId : selected->chunkIds)
-            {
-                const auto &chunk = chunks[chunkId];
-                if (payload_.size() > selected->reconstructedSize ||
-                    chunk.size() > selected->reconstructedSize - payload_.size())
-                    throw std::runtime_error("The PCBRX payload exceeds its declared size");
-                payload_.insert(payload_.end(), chunk.begin(), chunk.end());
-            }
-            if (payload_.size() != selected->reconstructedSize)
-                throw std::runtime_error("The reconstructed PCBRX payload has the wrong size");
-            if (payload_.size() < 8)
-                throw std::runtime_error("The reconstructed PCBRX payload is truncated");
-            std::uint32_t payloadMagic{};
-            std::uint32_t payloadVersion{};
-            std::memcpy(&payloadMagic, payload_.data(), sizeof(payloadMagic));
-            std::memcpy(&payloadVersion, payload_.data() + sizeof(payloadMagic), sizeof(payloadVersion));
-            if (payloadMagic != kPcbrMagic || payloadVersion != 17)
-                throw std::runtime_error("The reconstructed payload is not PCBRX v17");
+            payload_ = *selected->payload; // Already reconstructed and checked above.
             payloadValidated_ = true;
         }
         else
@@ -306,6 +384,8 @@ bool BrxDocument::OpenReadOnlyInPlace(const std::filesystem::path &path, std::st
 
         if (payloadValidated_)
         {
+            if (!ExtractLocalizationFooter(payload_, localizationFooter_, error))
+                throw std::runtime_error(error);
             BrxLoader::ParseWorld(*this);
             for (std::size_t bitmapIndex = 0; bitmapIndex < bitmaps_.size(); ++bitmapIndex)
             {
@@ -408,6 +488,97 @@ bool BrxDocument::OpenReadOnlyInPlace(const std::filesystem::path &path, std::st
         Close();
         return false;
     }
+}
+
+bool BrxDocument::LoadLanguageSubtitles(const std::uint32_t languageId, std::string &error)
+{
+    auto found = std::find_if(languages_.begin(), languages_.end(),
+                               [&](const auto &language) { return language.languageId == languageId; });
+    if (found == languages_.end() || !found->payload)
+    {
+        error = "This language has no preserved world payload.";
+        return false;
+    }
+    if (found->subtitlesLoaded && found->voiceLinesLoaded)
+        return true;
+    BrxDocument localized;
+    if (!localized.OpenPayloadBytes(*found->payload, error))
+        return false;
+    if (std::any_of(localized.Sections().begin(), localized.Sections().end(),
+                    [](const auto &section) { return section.state == BrxSectionState::Pending; }))
+    {
+        error = "This language world was only partially decoded; subtitle editing is disabled to preserve its data.";
+        return false;
+    }
+    std::vector<BrxLocalizedSubtitle> lines;
+    std::vector<BrxLanguagePayload::VoiceLine> voices;
+    for (std::size_t objectIndex = 0; objectIndex < localized.Objects().size(); ++objectIndex)
+    {
+        const auto &object = localized.Objects()[objectIndex];
+        if (!object.dialog.present || object.proxyClone)
+            continue;
+        for (std::size_t eventIndex = 0; eventIndex < object.dialog.events.size(); ++eventIndex)
+        {
+            const auto &event = object.dialog.events[eventIndex];
+            if (event.kind == BrxDialogEventKind::PreloadAudio)
+            {
+                BrxLanguagePayload::VoiceLine voice;
+                voice.objectIndex = static_cast<std::uint32_t>(objectIndex);
+                voice.eventIndex = static_cast<std::uint32_t>(eventIndex);
+                voice.dialogOid = object.oid;
+                voice.resourceName = voice.originalResourceName = event.resourceName;
+                voices.push_back(std::move(voice));
+            }
+            if (event.kind != BrxDialogEventKind::Talk)
+                continue;
+            BrxLocalizedSubtitle line;
+            line.objectIndex = static_cast<std::uint32_t>(objectIndex);
+            line.eventIndex = static_cast<std::uint32_t>(eventIndex);
+            line.dialogOid = object.oid;
+            line.subtitle = line.originalSubtitle = event.subtitle;
+            lines.push_back(std::move(line));
+        }
+    }
+    for (const auto &edit : found->subtitles)
+    {
+        if (!edit.modified)
+            continue;
+        const auto line = std::find_if(lines.begin(), lines.end(), [&](const auto &candidate)
+        {
+            return candidate.objectIndex == edit.objectIndex && candidate.eventIndex == edit.eventIndex &&
+                   candidate.dialogOid == edit.dialogOid;
+        });
+        if (line == lines.end() || edit.subtitle.size() > 65535u || edit.subtitle.find('\0') != std::string::npos)
+        {
+            error = "A localized subtitle no longer matches its preserved DIALOG event.";
+            return false;
+        }
+        line->subtitle = edit.subtitle;
+        line->modified = line->subtitle != line->originalSubtitle;
+    }
+    for (const auto &edit : found->voiceLines)
+    {
+        if (!edit.modified)
+            continue;
+        auto voice = std::find_if(voices.begin(), voices.end(), [&](const auto &candidate)
+        {
+            return candidate.objectIndex == edit.objectIndex && candidate.eventIndex == edit.eventIndex &&
+                   candidate.dialogOid == edit.dialogOid;
+        });
+        if (voice == voices.end() || !ValidateDialogVoiceResource(edit.resourceName, error))
+        {
+            if (error.empty()) error = "A voice edit no longer matches its preserved Preload audio event.";
+            return false;
+        }
+        voice->resourceName = edit.resourceName;
+        voice->modified = voice->resourceName != voice->originalResourceName;
+    }
+    found->subtitles = std::move(lines);
+    found->voiceLines = std::move(voices);
+    found->subtitlesLoaded = true;
+    found->voiceLinesLoaded = true;
+    error.clear();
+    return true;
 }
 
 void BrxDocument::SynchronizeDerivedObjectRecord(const std::int32_t objectIndex)
@@ -529,6 +700,8 @@ void BrxDocument::Close()
     defaultLanguage_ = 0;
     chunkCount_ = 0;
     languages_.clear();
+    localizationFooter_.clear();
+    dialogWaves_.clear();
     payload_.clear();
     payloadValidated_ = false;
     worldHeader_ = {};
@@ -1433,6 +1606,280 @@ bool BrxDocument::ApplyGlobGeometryTransform(const std::size_t globIndex, const 
     return true;
 }
 
+bool BrxDocument::PrepareStaticGlobCopy(const std::size_t source, const std::int32_t target,
+                                      BrxGlobRecord &copy, std::size_t &targetSet, std::string &error) const
+{
+    const auto fail = [&](const char *message) { error = message; return false; };
+    if (source >= globs_.size() || target < 0 || static_cast<std::size_t>(target) >= objects_.size())
+        return fail("Select an existing GLOB and destination object.");
+    const auto &destination = objects_[static_cast<std::size_t>(target)];
+    const auto &original = globs_[source];
+    if (original.ownerObjectIndex == target)
+        return fail("Use Duplicate GLOB as instance to copy within the same owning object.");
+    if (original.ownerObjectIndex < 0 || static_cast<std::size_t>(original.ownerObjectIndex) >= objects_.size())
+        return fail("The source GLOB has no valid owner.");
+    const auto &sourceOwner = objects_[static_cast<std::size_t>(original.ownerObjectIndex)];
+    if (!CidDerivesFrom(destination.cid, 2) || destination.cid == 108 || destination.cid == 109)
+        return fail("The destination must serialize an authored ALO-derived GLOBSET.");
+    if (destination.proxyClone || destination.proxyRecordIndex >= 0 ||
+        sourceOwner.proxyClone || sourceOwner.proxyRecordIndex >= 0)
+        return fail("Make linked PROXY hierarchies unique before copying GLOBs between owners.");
+    const BrxGlobsetRecord *sourceSet = nullptr;
+    targetSet = globsets_.size();
+    std::size_t targetCount = 0;
+    for (std::size_t index = 0; index < globsets_.size(); ++index)
+    {
+        const auto &set = globsets_[index];
+        if (std::find(set.globIndices.begin(), set.globIndices.end(), source) != set.globIndices.end())
+        {
+            if (sourceSet != nullptr || set.ownerObjectIndex != original.ownerObjectIndex)
+                return fail("The source GLOBSET ownership is invalid.");
+            sourceSet = &set;
+        }
+        if (set.ownerObjectIndex == target) { targetSet = index; ++targetCount; }
+    }
+    if (sourceSet == nullptr || targetCount != 1)
+        return fail("Both objects must have an existing, unambiguous native GLOBSET.");
+    const auto &destinationSet = globsets_[targetSet];
+    if (!sourceSet->boneOids.empty() || !sourceSet->poseWeights.empty() ||
+        !destinationSet.boneOids.empty() || !destinationSet.poseWeights.empty() || destination.globPoseCount != 0)
+        return fail("This static-copy operation does not transfer bone bindings or pose tables.");
+    if (destinationSet.globIndices.size() >= (std::numeric_limits<std::uint16_t>::max)())
+        return fail("The destination GLOBSET is full.");
+    std::size_t geometry = source;
+    for (std::size_t guard = 0; globs_[geometry].instanced; ++guard)
+    {
+        if (guard >= globs_.size()) return fail("The source instance chain is cyclic.");
+        geometry = ResolveGlobSourceRecordIndex(geometry, globs_, globsets_);
+        if (geometry >= globs_.size()) return fail("The source instance chain is invalid.");
+    }
+    copy = original;
+    copy.sourceSubglobs = globs_[geometry].sourceSubglobs;
+    copy.sourceCelRecords = globs_[geometry].sourceCelRecords;
+    if (copy.sourceSubglobs.empty()) return fail("The source GLOB has no static visual geometry.");
+    if (copy.sourceSubglobs.size() > 65535 || copy.sourceCelRecords.size() > 65535)
+        return fail("The source part/outline counts exceed native U16 limits.");
+    // RTCK is serialized on every GLOB. GLEAM and WRBG also belong to the
+    // selected instance; LoadGlobsetFromBrx does not inherit those pointers.
+    if (original.hasWarp || original.hasGleam || original.rotationTracking != 0 ||
+        std::any_of(globWarps_.begin(), globWarps_.end(), [&](const BrxGlobWarpRecord &binding)
+            { return binding.ownerObjectIndex == original.ownerObjectIndex && binding.renderGroup == original.renderGroup; }))
+        return fail("Warped, GLEAM or camera-tracking GLOBs require their original setup and cannot use static copy.");
+    // SAA, unlike those per-instance fields, can be inherited from a source.
+    for (std::size_t index = source, guard = 0; guard < globs_.size(); ++guard)
+    {
+        const auto &record = globs_[index];
+        if (record.hasShaderAnimation)
+            return fail("The GLOB inherits shader animation and cannot use static copy.");
+        if (!record.instanced) break;
+        index = ResolveGlobSourceRecordIndex(index, globs_, globsets_);
+    }
+    const auto finite = [](const glm::mat4 &m)
+    { return std::all_of(glm::value_ptr(m), glm::value_ptr(m) + 16, [](float v) { return std::isfinite(v); }); };
+    const auto targetWorld = glm::make_mat4(destination.worldTransform);
+    auto sourceWorld = glm::make_mat4(original.sourceToWorld);
+    if (original.editorCreatedInstance)
+        sourceWorld = glm::make_mat4(original.instanceTransform) * sourceWorld;
+    else if (original.hasEditorPlacementTransform)
+        sourceWorld = glm::make_mat4(original.editorPlacementTransform) * sourceWorld;
+    const float targetDeterminant = glm::determinant(glm::mat3(targetWorld));
+    if (!finite(targetWorld) || !finite(sourceWorld) || !std::isfinite(targetDeterminant) ||
+        std::abs(targetDeterminant) <= 1.0e-8f)
+        return fail("The source or destination transform is non-finite or non-invertible.");
+    const auto affine = [](const glm::mat4 &matrix)
+    { return matrix[0][3] == 0.0f && matrix[1][3] == 0.0f && matrix[2][3] == 0.0f && matrix[3][3] == 1.0f; };
+    if (!affine(targetWorld) || !affine(sourceWorld))
+        return fail("Static copy requires native affine object transforms.");
+    const auto bake = glm::inverse(targetWorld) * sourceWorld;
+    if (!finite(bake)) return fail("The copy cannot be represented in destination-local space.");
+    // Retail sphere scaling uses the largest basis length. That is a safe
+    // bound for rotation/scale, but not a sheared destination frame.
+    const glm::vec3 axes[]{glm::normalize(glm::vec3(targetWorld[0])), glm::normalize(glm::vec3(targetWorld[1])),
+                           glm::normalize(glm::vec3(targetWorld[2]))};
+    if (std::abs(glm::dot(axes[0], axes[1])) > 0.0001f || std::abs(glm::dot(axes[0], axes[2])) > 0.0001f ||
+        std::abs(glm::dot(axes[1], axes[2])) > 0.0001f)
+        return fail("The destination has a sheared transform; static copy cannot preserve safe retail bounds for it.");
+    const auto transform = [&](float *values, bool direction)
+    {
+        const auto v = direction ? glm::mat3(bake) * glm::make_vec3(values)
+                                 : glm::vec3(bake * glm::vec4(glm::make_vec3(values), 1.0f));
+        if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) return false;
+        std::copy_n(&v.x, 3, values);
+        return true;
+    };
+    glm::vec3 lower((std::numeric_limits<float>::max)()), upper((std::numeric_limits<float>::lowest)());
+    bool hasVertices = false;
+    for (auto &part : copy.sourceSubglobs)
+    {
+        if (part.boneCount != 0 || !part.posePositionDeltas.empty() || !part.poseNormalDeltas.empty())
+            return fail("The source contains skinning or pose data.");
+        if (part.shaderIndex >= shaders_.size() || shaders_[part.shaderIndex].animation.kind != BrxShaderAnimationKind::None)
+            return fail("Assign valid, non-animated materials before using static copy.");
+        if (!std::isfinite(part.selfIllumination)) return fail("The source material brightness is non-finite.");
+        if (part.vertices.size() > 65535 || part.triangles.size() > 65535)
+            return fail("The source geometry exceeds native U16 limits.");
+        for (const auto &triangle : part.triangles)
+            for (const auto index : triangle)
+                if (index >= part.vertices.size()) return fail("The source contains an invalid triangle.");
+        glm::vec3 partLower((std::numeric_limits<float>::max)()), partUpper((std::numeric_limits<float>::lowest)());
+        for (auto &vertex : part.vertices)
+        {
+            if (!std::all_of(std::begin(vertex.color), std::end(vertex.color), [](float v) { return std::isfinite(v); }) ||
+                !std::all_of(std::begin(vertex.uv), std::end(vertex.uv), [](float v) { return std::isfinite(v); }))
+                return fail("The source contains non-finite colors or texture coordinates.");
+            if (std::any_of(std::begin(vertex.boneWeights), std::end(vertex.boneWeights), [](float v) { return v != 0.0f; }))
+                return fail("The source contains weighted vertices.");
+            if (!transform(vertex.position, false) || !transform(vertex.normal, true))
+                return fail("The transformed geometry exceeds finite numeric limits.");
+            partLower = glm::min(partLower, glm::make_vec3(vertex.position));
+            partUpper = glm::max(partUpper, glm::make_vec3(vertex.position));
+            hasVertices = true;
+        }
+        if (part.vertices.empty()) return fail("The source contains an empty model part.");
+        const auto center = (partLower + partUpper) * 0.5f;
+        std::copy_n(&center.x, 3, part.center);
+        part.radius = glm::length(partUpper - center);
+        lower = glm::min(lower, partLower); upper = glm::max(upper, partUpper);
+    }
+    if (!hasVertices) return fail("The source has no vertices.");
+    for (auto &cel : copy.sourceCelRecords)
+    {
+        if (!cel.posePositionDeltas.empty() || cel.points.size() % 4 != 0)
+            return fail("The source outline contains unsupported pose data or invalid edges.");
+        for (auto &point : cel.points)
+            if (std::any_of(std::begin(point.boneWeights), std::end(point.boneWeights), [](float v) { return v != 0.0f; }) ||
+                !transform(point.position, false)) return fail("The source outline cannot be copied as static geometry.");
+    }
+    auto center = (lower + upper) * 0.5f;
+    copy.radius = glm::length(upper - center);
+    // Fixed SO and MS culling spheres are world-space; their vertices remain local.
+    if (destination.cid == 4 || (destination.so.present && destination.so.fixedPhysics))
+    {
+        center = glm::vec3(targetWorld * glm::vec4(center, 1.0f));
+        copy.radius *= (std::max)({glm::length(glm::vec3(targetWorld[0])), glm::length(glm::vec3(targetWorld[1])), glm::length(glm::vec3(targetWorld[2]))});
+    }
+    else
+    {
+        // RenderAloGlobset transforms a non-fixed center, but passes sRadius
+        // directly to SphereInFrustum/FInsideCmMrd without scaling it.
+        const float worldScale = (std::max)({glm::length(glm::vec3(targetWorld[0])),
+            glm::length(glm::vec3(targetWorld[1])), glm::length(glm::vec3(targetWorld[2]))});
+        copy.radius = (std::max)(copy.radius, copy.radius * worldScale);
+    }
+    if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z) || !std::isfinite(copy.radius))
+        return fail("The copied bounds exceed finite numeric limits.");
+    std::copy_n(&center.x, 3, copy.center);
+    copy.ownerObjectIndex = target;
+    copy.instanced = copy.editorCreatedInstance = copy.hasEditorPlacementTransform = false;
+    copy.sourceGlobIndex = -1; copy.sourceRecordIndex = static_cast<std::size_t>(-1);
+    const glm::mat4 identity(1.0f);
+    std::copy_n(glm::value_ptr(identity), 16, copy.instanceTransform);
+    std::copy_n(glm::value_ptr(identity), 16, copy.editorPlacementTransform);
+    std::copy_n(glm::value_ptr(targetWorld), 16, copy.sourceToWorld);
+    copy.derivedBatches.clear(); copy.derivedCelPackets.clear();
+    // Materialize inherited static values before removing the instance chain.
+    const auto inherited = [&](const auto &owns)
+    {
+        std::size_t index = source;
+        for (std::size_t guard = 0; guard < globs_.size(); ++guard)
+        {
+            if (owns(globs_[index]) || !globs_[index].instanced) return &globs_[index];
+            index = ResolveGlobSourceRecordIndex(index, globs_, globsets_);
+        }
+        return &globs_[source];
+    };
+    const auto zones = inherited([](const auto &g) { return g.hasZoneMask; });
+    copy.hasZoneMask = zones->hasZoneMask; copy.zoneMask = zones->zoneMask;
+    const auto sort = inherited([](const auto &g) { return g.hasExplicitSortZ; });
+    copy.hasExplicitSortZ = sort->hasExplicitSortZ; copy.authoredSortZ = sort->authoredSortZ;
+    const auto fog = inherited([](const auto &g) { return g.hasFogScale; });
+    copy.hasFogScale = fog->hasFogScale; copy.fogScale = fog->fogScale;
+    const auto radiusScale = inherited([](const auto &g) { return g.hasSubglobRadiusScale; });
+    copy.hasSubglobRadiusScale = radiusScale->hasSubglobRadiusScale;
+    copy.subglobRadiusScale = radiusScale->subglobRadiusScale;
+    copy.hasMaximumRenderDistance = copy.hasCelMaximumRenderDistance = true;
+    copy.maximumRenderDistanceInfinite = copy.celMaximumRenderDistanceInfinite = false;
+    copy.authoredMaximumRenderDistance = original.maximumRenderDistance;
+    copy.authoredCelMaximumRenderDistance = original.celMaximumRenderDistance;
+    copy.propertyMask = 0; copy.modified = true;
+    copy.oid = -1; // Visual copy does not duplicate an owner's named GLOB identity.
+    copy.editorName = GlobEditorLabel(source) + " (Copy)";
+    copy.renderGroup = 0;
+    for (const auto &record : globs_)
+    {
+        if (record.renderGroup >= (std::numeric_limits<std::uint32_t>::max)() - 1u)
+            return fail("There is no free render-group identity.");
+        copy.renderGroup = (std::max)(copy.renderGroup, record.renderGroup + 1);
+    }
+    auto worldCenter = glm::make_vec3(copy.center);
+    float worldRadius = copy.radius;
+    if (destination.cid != 4 && !(destination.so.present && destination.so.fixedPhysics))
+    {
+        worldCenter = glm::vec3(targetWorld * glm::vec4(worldCenter, 1.0f));
+        // sRadius was already expanded above when scale > 1. The hierarchy
+        // sphere is serialized in world units and must not apply scale twice.
+        const float scale = (std::max)({glm::length(glm::vec3(targetWorld[0])),
+            glm::length(glm::vec3(targetWorld[1])), glm::length(glm::vec3(targetWorld[2]))});
+        worldRadius *= (std::min)(1.0f, scale);
+    }
+    std::vector<bool> visited(objects_.size(), false);
+    for (std::int32_t owner = target; owner >= 0; owner = objects_[owner].parentIndex)
+    {
+        if (static_cast<std::size_t>(owner) >= objects_.size() || visited[owner])
+            return fail("The destination hierarchy has an invalid parent or cycle.");
+        visited[owner] = true;
+        const auto origin = glm::vec3(glm::make_mat4(objects_[owner].worldTransform)[3]);
+        if (!std::isfinite(glm::length(worldCenter - origin) + worldRadius))
+            return fail("The copied visual exceeds finite hierarchy bounds.");
+    }
+    error.clear();
+    return true;
+}
+
+bool BrxDocument::PreviewStaticGlobCopy(std::size_t source, std::int32_t target, std::string &error) const
+{
+    BrxGlobRecord copy; std::size_t set;
+    return PrepareStaticGlobCopy(source, target, copy, set, error);
+}
+
+std::size_t BrxDocument::CopyStaticGlobToObject(std::size_t source, std::int32_t target, std::string &error)
+{
+    BrxGlobRecord copy; std::size_t set;
+    if (!PrepareStaticGlobCopy(source, target, copy, set, error)) return static_cast<std::size_t>(-1);
+    const auto added = globs_.size();
+    const auto vertexCount = renderVertices_.size(), indexCount = renderIndices_.size(), edgeCount = celEdges_.size();
+    globs_.push_back(std::move(copy));
+    globsets_[set].globIndices.push_back(added);
+    if (!CommitGlobEdit(added))
+    {
+        globsets_[set].globIndices.pop_back(); globs_.pop_back();
+        renderVertices_.resize(vertexCount); renderIndices_.resize(indexCount); celEdges_.resize(edgeCount);
+        RebuildRenderPacketsFromGlobs();
+        error = "The copied GLOB could not build native render packets.";
+        return static_cast<std::size_t>(-1);
+    }
+    // Include the new, potentially offset visual in ALO hierarchy pruning.
+    glm::vec3 worldCenter = glm::make_vec3(globs_[added].center);
+    float worldRadius = globs_[added].radius;
+    const auto world = glm::make_mat4(objects_[target].worldTransform);
+    if (objects_[target].cid != 4 && !(objects_[target].so.present && objects_[target].so.fixedPhysics))
+    {
+        worldCenter = glm::vec3(world * glm::vec4(worldCenter, 1.0f));
+        const float scale = (std::max)({glm::length(glm::vec3(world[0])),
+            glm::length(glm::vec3(world[1])), glm::length(glm::vec3(world[2]))});
+        worldRadius *= (std::min)(1.0f, scale);
+    }
+    for (std::int32_t owner = target, guard = 0; owner >= 0 && static_cast<std::size_t>(owner) < objects_.size() &&
+         static_cast<std::size_t>(guard++) < objects_.size(); owner = objects_[owner].parentIndex)
+    {
+        auto &object = objects_[owner];
+        const float radius = glm::length(worldCenter - glm::vec3(glm::make_mat4(object.worldTransform)[3])) + worldRadius;
+        object.renderRadiusAll = (std::max)(object.renderRadiusAll, radius);
+        if (owner == target) object.renderRadiusSelf = (std::max)(object.renderRadiusSelf, radius);
+    }
+    return added;
+}
+
 std::size_t BrxDocument::DuplicateGlobAsInstance(const std::size_t sourceGlobRecordIndex)
 {
     if (sourceGlobRecordIndex >= globs_.size())
@@ -2004,3 +2451,5 @@ std::uint16_t BrxDocument::AllowedPropertyCount(const std::int16_t cid)
     static_assert(std::size(counts) == 148);
     return cid >= 0 && static_cast<std::size_t>(cid) < std::size(counts) ? counts[cid] : 0;
 }
+
+#include "BrxDocumentAudio.inc"

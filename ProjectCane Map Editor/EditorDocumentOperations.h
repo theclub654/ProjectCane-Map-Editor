@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -18,6 +19,9 @@ struct EditorOperationResult
 class EditorDocumentOperations
 {
   public:
+    // Remove one MS visual while retaining its native GLOB slot and shared collision.
+    static EditorOperationResult RemoveMsGlobVisual(BrxDocument &document, std::size_t globIndex);
+    static EditorOperationResult DeleteGlob(BrxDocument &document, std::size_t globIndex);
     enum class TnPreset : std::uint8_t
     {
         StaticFrame,
@@ -33,6 +37,10 @@ class EditorDocumentOperations
         Hang
     };
     static std::int16_t AllocateOid(const BrxDocument &document);
+    // Local XY convex outline extruded between bottom/top. Produces each
+    // class's existing native plane-volume or SO collision representation.
+    static EditorOperationResult SetVolumePrism(BrxDocument &document, std::int32_t ownerObjectIndex,
+        const std::vector<std::array<float, 2>> &outline, float bottom, float top);
     static EditorOperationResult CreateObject(BrxDocument &document, std::int16_t cid, std::int32_t parentIndex,
                                               const float *worldTransform = nullptr);
     static EditorOperationResult CreateXfm(BrxDocument &document, std::int32_t parentIndex,

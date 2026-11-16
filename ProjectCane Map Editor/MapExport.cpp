@@ -21,7 +21,12 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <iomanip>
+#include <iterator>
 #include <limits>
+#include <locale>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -489,6 +494,25 @@ glm::mat3 ExportNormalMatrix(const glm::mat4 &matrix)
     return std::abs(glm::determinant(linear)) > 1.0e-12f ? glm::transpose(glm::inverse(linear)) : linear;
 }
 
+void RequireFiniteModelMatrix(const glm::mat4 &matrix)
+{
+    for (int column = 0; column < 4; ++column)
+        for (int row = 0; row < 4; ++row)
+            if (!std::isfinite(matrix[column][row]))
+                throw std::runtime_error("Model export contains a non-finite transform.");
+}
+
+glm::mat4 InvertModelMatrix(const glm::mat4 &matrix)
+{
+    RequireFiniteModelMatrix(matrix);
+    const float determinant = glm::determinant(matrix);
+    if (!std::isfinite(determinant) || std::abs(determinant) <= 1.0e-12f)
+        throw std::runtime_error("Model export requires an invertible placement/bone transform.");
+    const glm::mat4 inverse = glm::inverse(matrix);
+    RequireFiniteModelMatrix(inverse);
+    return inverse;
+}
+
 std::int32_t ResolveExportBone(const std::vector<BrxObjectRecord> &objects, const std::int16_t oid,
                                const std::int32_t context)
 {
@@ -536,9 +560,192 @@ std::int32_t ResolveExportBone(const std::vector<BrxObjectRecord> &objects, cons
     return best;
 }
 
+// Consume the same generated scene as GLB, rather than maintaining a second
+// BRX geometry/material converter. OBJ flattens the exported bind pose.
+bool WriteSceneObj(const json &gltf, const std::vector<std::uint8_t> &binary,
+                   const std::filesystem::path &path, std::string &error)
+{
+    std::string sidecar;
+    for (const auto byte : path.stem().u8string())
+    {
+        const char c = static_cast<char>(byte);
+        if (sidecar.size() == 48)
+            break;
+        sidecar.push_back((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                                 (c >= '0' && c <= '9') || c == '_' ? c : '_');
+    }
+    if (sidecar.empty())
+        sidecar = "Model";
+    // Sanitizing alone makes Ladder-red.obj and Ladder_red.obj overwrite the
+    // same companion files. Retain a stable identity from the actual filename.
+    std::uint64_t filenameHash = 14695981039346656037ull;
+    for (const auto byte : path.filename().u8string())
+    {
+        filenameHash ^= static_cast<std::uint8_t>(byte);
+        filenameHash *= 1099511628211ull;
+    }
+    std::ostringstream identity;
+    identity << std::hex << filenameHash;
+    sidecar += '_' + identity.str();
+    const std::string materialFile = sidecar + ".mtl";
+    std::ostringstream obj, mtl;
+    obj.imbue(std::locale::classic());
+    mtl.imbue(std::locale::classic());
+    obj << std::setprecision(std::numeric_limits<float>::max_digits10);
+    mtl << std::setprecision(std::numeric_limits<float>::max_digits10);
+    obj << "# ProjectCane selected model; game Z-up; game units; bind pose; no gameplay or collision\nmtllib "
+        << materialFile << '\n';
+    const auto &views = gltf.at("bufferViews");
+    const auto &accessors = gltf.at("accessors");
+    const auto read = [&](const int accessorIndex, const std::size_t element, const std::size_t component,
+                          const std::size_t components, const bool integer)
+    {
+        const auto &accessor = accessors.at(accessorIndex);
+        if (accessor.at("componentType").get<int>() != (integer ? 5125 : 5126) ||
+            element >= accessor.at("count").get<std::size_t>() || component >= components)
+            throw std::runtime_error("Invalid generated OBJ accessor.");
+        const auto &view = views.at(accessor.at("bufferView").get<int>());
+        const std::size_t offset = view.value("byteOffset", std::size_t{0}) +
+                                   accessor.value("byteOffset", std::size_t{0}) +
+                                   (element * components + component) * sizeof(float);
+        if (offset > binary.size() || binary.size() - offset < sizeof(float))
+            throw std::runtime_error("OBJ accessor exceeds the generated buffer.");
+        if (integer)
+        {
+            std::uint32_t value;
+            std::memcpy(&value, binary.data() + offset, sizeof(value));
+            return static_cast<double>(value);
+        }
+        float value;
+        std::memcpy(&value, binary.data() + offset, sizeof(value));
+        if (!std::isfinite(value))
+            throw std::runtime_error("Model contains a non-finite export value.");
+        return static_cast<double>(value);
+    };
+    std::vector<std::pair<std::filesystem::path, std::vector<std::uint8_t>>> imageFiles;
+    for (std::size_t index = 0; index < gltf.at("materials").size(); ++index)
+    {
+        const auto &material = gltf.at("materials")[index];
+        const auto &pbr = material.at("pbrMetallicRoughness");
+        const auto &color = pbr.at("baseColorFactor");
+        mtl << "newmtl Material_" << index << "\nKd " << color[0].get<float>() << ' ' << color[1].get<float>()
+            << ' ' << color[2].get<float>() << "\nd " << color[3].get<float>() << "\nillum 1\n";
+        if (pbr.contains("baseColorTexture"))
+        {
+            const int texture = pbr["baseColorTexture"].at("index").get<int>();
+            const int image = gltf.at("textures").at(texture).at("source").get<int>();
+            const int viewIndex = gltf.at("images").at(image).at("bufferView").get<int>();
+            const auto &view = views.at(viewIndex);
+            const std::size_t offset = view.value("byteOffset", std::size_t{0});
+            const std::size_t length = view.at("byteLength").get<std::size_t>();
+            if (offset > binary.size() || length > binary.size() - offset)
+                throw std::runtime_error("OBJ texture exceeds the generated buffer.");
+            const std::string name = sidecar + "_material_" + std::to_string(index) + ".png";
+            imageFiles.emplace_back(path.parent_path() / name,
+                                    std::vector<std::uint8_t>(binary.begin() + offset, binary.begin() + offset + length));
+            mtl << "map_Kd " << name << '\n';
+        }
+        mtl << '\n';
+    }
+    std::vector<std::pair<int, glm::mat4>> pending;
+    // OBJ has no mandated up axis. Keep native game coordinates for direct
+    // reimport; cancel the GLB scene's external Y-up conversion exactly once.
+    const glm::mat4 yUpToZUp = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1, 0, 0));
+    for (const auto &node : gltf.at("scenes")[0].at("nodes"))
+        pending.emplace_back(node.get<int>(), yUpToZUp);
+    std::unordered_set<int> visited;
+    std::size_t vertexBase = 1;
+    while (!pending.empty())
+    {
+        const auto [nodeIndex, parent] = pending.back();
+        pending.pop_back();
+        if (!visited.insert(nodeIndex).second)
+            throw std::runtime_error("Exported model hierarchy contains a repeated node or cycle.");
+        const auto &node = gltf.at("nodes").at(nodeIndex);
+        glm::mat4 local(1.0f);
+        if (node.contains("matrix"))
+            for (int column = 0; column < 4; ++column)
+                for (int row = 0; row < 4; ++row)
+                    local[column][row] = node["matrix"].at(column * 4 + row).get<float>();
+        const glm::mat4 transform = parent * local;
+        if (node.contains("children"))
+            for (const auto &child : node["children"])
+                pending.emplace_back(child.get<int>(), transform);
+        if (!node.contains("mesh"))
+            continue;
+        const glm::mat3 normalMatrix = ExportNormalMatrix(transform);
+        const bool mirrored = glm::determinant(glm::mat3(transform)) < 0.0f;
+        const auto &mesh = gltf.at("meshes").at(node.at("mesh").get<int>());
+        std::size_t part = 0;
+        for (const auto &primitive : mesh.at("primitives"))
+        {
+            const auto &attributes = primitive.at("attributes");
+            const int positions = attributes.at("POSITION").get<int>();
+            const int normals = attributes.at("NORMAL").get<int>();
+            const int uvs = attributes.at("TEXCOORD_0").get<int>();
+            const int colors = attributes.at("COLOR_0").get<int>();
+            const std::size_t count = accessors.at(positions).at("count").get<std::size_t>();
+            obj << "\no Model_" << nodeIndex << "_Part_" << part++ << "\nusemtl Material_"
+                << primitive.at("material").get<int>() << '\n';
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const glm::vec3 position(transform * glm::vec4(read(positions, i, 0, 3, false),
+                    read(positions, i, 1, 3, false), read(positions, i, 2, 3, false), 1.0f));
+                const glm::vec3 normal = SafeNormalize(normalMatrix * glm::vec3(read(normals, i, 0, 3, false),
+                    read(normals, i, 1, 3, false), read(normals, i, 2, 3, false)));
+                if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z))
+                    throw std::runtime_error("Model has a non-finite export transform.");
+                obj << "v " << position.x << ' ' << position.y << ' ' << position.z << ' '
+                    << read(colors, i, 0, 4, false) << ' ' << read(colors, i, 1, 4, false) << ' '
+                    << read(colors, i, 2, 4, false) << ' ' << read(colors, i, 3, 4, false) << '\n';
+                // glTF image/UV origin is top-left; OBJ UV origin is bottom-left.
+                obj << "vt " << read(uvs, i, 0, 2, false) << ' ' << 1.0 - read(uvs, i, 1, 2, false) << '\n';
+                obj << "vn " << normal.x << ' ' << normal.y << ' ' << normal.z << '\n';
+            }
+            const int indices = primitive.at("indices").get<int>();
+            const std::size_t indexCount = accessors.at(indices).at("count").get<std::size_t>();
+            if (indexCount % 3 != 0)
+                throw std::runtime_error("Model contains an incomplete export triangle.");
+            for (std::size_t i = 0; i < indexCount; i += 3)
+            {
+                obj << "f";
+                for (const int corner : {0, mirrored ? 2 : 1, mirrored ? 1 : 2})
+                {
+                    const auto index = static_cast<std::size_t>(read(indices, i + corner, 0, 1, true));
+                    if (index >= count)
+                        throw std::runtime_error("OBJ triangle has an invalid vertex index.");
+                    const std::size_t value = vertexBase + index;
+                    obj << ' ' << value << '/' << value << '/' << value;
+                }
+                obj << '\n';
+            }
+            vertexBase += count;
+        }
+    }
+    const auto write = [&](const std::filesystem::path &file, const char *data, const std::size_t size)
+    {
+        std::ofstream output(file, std::ios::binary | std::ios::trunc);
+        output.write(data, static_cast<std::streamsize>(size));
+        output.close();
+        if (!output)
+        {
+            error = "Could not write model export file: " + file.string();
+            return false;
+        }
+        return true;
+    };
+    // Validate and assemble the scene before opening any output files.
+    for (const auto &[file, bytes] : imageFiles)
+        if (!write(file, reinterpret_cast<const char *>(bytes.data()), bytes.size()))
+            return false;
+    const std::string materialText = mtl.str(), objectText = obj.str();
+    return write(path.parent_path() / materialFile, materialText.data(), materialText.size()) &&
+           write(path, objectText.data(), objectText.size());
+}
+
 bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &path, const bool baked,
                     const std::size_t onlyGlob, const std::size_t onlyGlobset, const bool includeLights,
-                    std::string &error)
+                    std::string &error, const ModelExportOptions *modelOptions = nullptr)
 {
     error.clear();
     try
@@ -607,16 +814,28 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
         const auto getMaterial = [&](const int shaderIndex)
         {
             if (shaderIndex < 0 || static_cast<std::size_t>(shaderIndex) >= document.Shaders().size())
+            {
+                // Inspector uses 0xffff for an explicitly unassigned material.
+                // Keep that default-material export path valid.
+                if (modelOptions && shaderIndex >= 0 && shaderIndex != 0xffff)
+                    throw std::runtime_error("Selected model references a missing material.");
                 return 0;
+            }
             if (const auto found = materialCache.find(shaderIndex); found != materialCache.end())
                 return found->second;
             const auto &shader = document.Shaders()[static_cast<std::size_t>(shaderIndex)];
+            if (modelOptions)
+                for (const auto channel : shader.rgba)
+                    if (!std::isfinite(channel))
+                        throw std::runtime_error("Selected model has a non-finite material color.");
             json pbr = {{"baseColorFactor", {shader.rgba[0], shader.rgba[1], shader.rgba[2], shader.rgba[3]}},
                         {"metallicFactor", 0.0},
                         {"roughnessFactor", 1.0}};
             const int bitmap = shader.diffuseBitmapIndices.empty()
                                    ? (shader.ambientBitmapIndices.empty() ? -1 : shader.ambientBitmapIndices[0])
                                    : shader.diffuseBitmapIndices[0];
+            if (modelOptions && bitmap >= 0 && static_cast<std::size_t>(bitmap) >= document.Bitmaps().size())
+                throw std::runtime_error("Selected model references a missing texture.");
             if (bitmap >= 0 && static_cast<std::size_t>(bitmap) < document.Bitmaps().size())
             {
                 std::vector<std::uint8_t> png;
@@ -633,6 +852,8 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
                     textures.push_back({{"source", image}});
                     pbr["baseColorTexture"] = {{"index", texture}};
                 }
+                else if (modelOptions)
+                    throw std::runtime_error("Could not decode a selected model texture for export.");
             }
             json material = {
                 {"name", shader.editorName.empty() ? "Shader_" + std::to_string(shaderIndex) : shader.editorName},
@@ -648,21 +869,69 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
             return result;
         };
 
-        const glm::mat4 zUpToYUp = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1, 0, 0));
+        glm::mat4 exportBasis = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1, 0, 0));
+        glm::mat4 placement(1.0f), worldToModel(1.0f);
+        if (modelOptions && !modelOptions->worldSpace)
+        {
+            if (onlyGlob != AllRecords)
+                placement = glm::make_mat4(globs[onlyGlob].sourceToWorld);
+            else if (onlyGlobset != AllRecords)
+            {
+                const auto owner = globsets[onlyGlobset].ownerObjectIndex;
+                if (owner < 0 || static_cast<std::size_t>(owner) >= objects.size())
+                {
+                    error = "Model-local export requires a valid model owner. Try world coordinates.";
+                    return false;
+                }
+                placement = glm::make_mat4(objects[static_cast<std::size_t>(owner)].worldTransform);
+            }
+            const float determinant = glm::determinant(placement);
+            if (!std::isfinite(determinant) || std::abs(determinant) <= 1.0e-12f)
+            {
+                error = "Model placement cannot be inverted. Try world coordinates or restore nonzero scale.";
+                return false;
+            }
+            worldToModel = InvertModelMatrix(placement);
+            exportBasis *= worldToModel;
+        }
+        if (modelOptions)
+            RequireFiniteModelMatrix(exportBasis);
         const int basisNode = static_cast<int>(nodes.size());
         nodes.push_back(
-            {{"name", "ProjectCane_Z_Up"}, {"matrix", ExportMatrix(zUpToYUp)}, {"children", json::array()}});
+            {{"name", "ProjectCane_Z_Up"}, {"matrix", ExportMatrix(exportBasis)}, {"children", json::array()}});
         std::size_t primitiveCount = 0;
 
         const auto appendPrimitive = [&](const BrxSubglobRecord &subglob, const glm::mat4 &sourceToOutput,
                                          const glm::mat4 &sourceToWorld, const bool skinned, json &primitiveArray)
         {
+            if (modelOptions)
+            {
+                RequireFiniteModelMatrix(sourceToOutput);
+                RequireFiniteModelMatrix(sourceToWorld);
+                if (subglob.vertices.empty() && !subglob.triangles.empty())
+                    throw std::runtime_error("Selected model has triangles without vertices.");
+                for (const auto &vertex : subglob.vertices)
+                {
+                    const auto finite = [](const auto &values)
+                    {
+                        return std::all_of(std::begin(values), std::end(values),
+                                           [](const float value) { return std::isfinite(value); });
+                    };
+                    if (!finite(vertex.position) || !finite(vertex.normal) || !finite(vertex.uv) ||
+                        !finite(vertex.color) || (skinned && !finite(vertex.boneWeights)))
+                        throw std::runtime_error("Selected model contains non-finite vertex data.");
+                }
+            }
             if (subglob.vertices.empty() || subglob.triangles.empty())
                 return false;
             for (const auto &triangle : subglob.triangles)
                 if (triangle[0] >= subglob.vertices.size() || triangle[1] >= subglob.vertices.size() ||
                     triangle[2] >= subglob.vertices.size())
+                {
+                    if (modelOptions)
+                        throw std::runtime_error("Selected model has a triangle with an invalid vertex index.");
                     return false;
+                }
             const glm::mat3 normalToOutput = ExportNormalMatrix(sourceToOutput);
             // Baked lighting must reproduce ProjectCane's glob.vert, which
             // transforms runtime GLOB normals with mat3(model), not an
@@ -676,6 +945,8 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
             for (const auto &vertex : subglob.vertices)
             {
                 const glm::vec3 value(sourceToOutput * glm::vec4(glm::make_vec3(vertex.position), 1.0f));
+                if (modelOptions && (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z)))
+                    throw std::runtime_error("Selected model position overflowed its export transform.");
                 minimum = glm::min(minimum, value);
                 maximum = glm::max(maximum, value);
                 Put(binary, value.x);
@@ -729,8 +1000,15 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
                 Align(binary);
                 const std::size_t jointOffset = binary.size();
                 for (const auto &vertex : subglob.vertices)
-                    for (const auto joint : vertex.boneIndices)
+                    for (int influence = 0; influence < 4; ++influence)
+                    {
+                        // glTF still requires unused joint indices to be in
+                        // range. The all-zero-weight fallback also needs a
+                        // valid joint when its first weight becomes one.
+                        const std::uint16_t joint = modelOptions && vertex.boneWeights[influence] <= 0.0f
+                                                        ? std::uint16_t{0} : vertex.boneIndices[influence];
                         Put(binary, joint);
+                    }
                 attributes["JOINTS_0"] =
                     addAccessor(jointOffset, binary.size() - jointOffset, 34962, 5123, subglob.vertices.size(), "VEC4");
                 Align(binary);
@@ -740,6 +1018,8 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
                     const float total =
                         (std::max)(0.0f, vertex.boneWeights[0]) + (std::max)(0.0f, vertex.boneWeights[1]) +
                         (std::max)(0.0f, vertex.boneWeights[2]) + (std::max)(0.0f, vertex.boneWeights[3]);
+                    if (modelOptions && !std::isfinite(total))
+                        throw std::runtime_error("Selected model skin weights overflow during normalization.");
                     for (int influence = 0; influence < 4; ++influence)
                     {
                         const float value = total > 0.000001f ? (std::max)(0.0f, vertex.boneWeights[influence]) / total
@@ -752,9 +1032,10 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
             }
             Align(binary);
             const std::size_t indexOffset = binary.size();
+            const bool reverseWinding = modelOptions && glm::determinant(glm::mat3(sourceToOutput)) < 0.0f;
             for (const auto &triangle : subglob.triangles)
-                for (const auto index : triangle)
-                    Put(binary, static_cast<std::uint32_t>(index));
+                for (const int corner : {0, reverseWinding ? 2 : 1, reverseWinding ? 1 : 2})
+                    Put(binary, static_cast<std::uint32_t>(triangle[corner]));
             const int indices = addAccessor(indexOffset, binary.size() - indexOffset, 34963, 5125,
                                             subglob.triangles.size() * 3u, "SCALAR");
             primitiveArray.push_back({{"attributes", std::move(attributes)},
@@ -773,12 +1054,17 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
             const auto &glob = globs[globIndex];
             const std::int32_t setIndex = globToSet[globIndex];
             const bool skinnedSet = setIndex >= 0 && !globsets[static_cast<std::size_t>(setIndex)].boneOids.empty();
+            const glm::mat4 sourceToWorld = glm::make_mat4(glob.sourceToWorld);
             json primitives = json::array();
             for (const auto &subglob : glob.sourceSubglobs)
             {
                 if (skinnedSet && subglob.boneCount > 0)
                     continue;
-                appendPrimitive(subglob, glm::mat4(1.0f), glm::make_mat4(glob.sourceToWorld), false, primitives);
+                // Put selected static parts in one shared model frame. This
+                // also keeps GLOBSET-relative offsets when a static importer
+                // reads mesh accessors without interpreting glTF scene nodes.
+                appendPrimitive(subglob, modelOptions ? worldToModel * sourceToWorld : glm::mat4(1.0f),
+                                sourceToWorld, false, primitives);
             }
             if (primitives.empty())
                 continue;
@@ -787,7 +1073,7 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
             const int globNode = static_cast<int>(nodes.size());
             nodes.push_back({{"name", document.GlobEditorLabel(globIndex)},
                              {"mesh", meshIndex},
-                             {"matrix", ExportMatrix(glm::make_mat4(glob.sourceToWorld))}});
+                             {"matrix", ExportMatrix(modelOptions ? placement : sourceToWorld)}});
             int parent = basisNode;
             if (setIndex >= 0)
             {
@@ -838,9 +1124,13 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
                 }
                 bones.push_back(bone);
             }
-            const glm::mat4 meshBind =
+            // Selected exports use the same frame for static and skinned
+            // accessors. Otherwise world-space and individual-GLOB exports
+            // reimport skin meshes in owner-local coordinates beside static
+            // parts in the chosen output frame.
+            const glm::mat4 meshBind = modelOptions ? placement :
                 glm::make_mat4(objects[static_cast<std::size_t>(set.ownerObjectIndex)].worldTransform);
-            const glm::mat4 worldToMesh = glm::inverse(meshBind);
+            const glm::mat4 worldToMesh = modelOptions ? InvertModelMatrix(meshBind) : glm::inverse(meshBind);
             const int rigRoot = static_cast<int>(nodes.size());
             nodes.push_back({{"name", "GLOBSET_" + std::to_string(setIndex) + "_Rig"},
                              {"matrix", ExportMatrix(meshBind)},
@@ -849,6 +1139,22 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
             std::unordered_map<std::int32_t, std::size_t> boneSlots;
             for (std::size_t slot = 0; slot < bones.size(); ++slot)
                 boneSlots[bones[slot]] = slot;
+            if (modelOptions)
+                for (std::size_t slot = 0; slot < bones.size(); ++slot)
+                {
+                    std::unordered_set<std::size_t> ancestors;
+                    std::size_t current = slot;
+                    while (true)
+                    {
+                        if (!ancestors.insert(current).second)
+                            throw std::runtime_error("Selected model bone hierarchy contains a cycle.");
+                        const auto parent = ExportRuntimeParent(objects[static_cast<std::size_t>(bones[current])]);
+                        const auto parentSlot = boneSlots.find(parent);
+                        if (parentSlot == boneSlots.end())
+                            break;
+                        current = parentSlot->second;
+                    }
+                }
             std::vector<int> jointNodes(bones.size(), -1);
             for (std::size_t slot = 0; slot < bones.size(); ++slot)
             {
@@ -860,7 +1166,10 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
                         ? meshBind
                         : glm::make_mat4(objects[static_cast<std::size_t>(parent)].worldTransform);
                 const glm::mat4 local =
-                    glm::inverse(parentWorld) * glm::make_mat4(objects[static_cast<std::size_t>(bone)].worldTransform);
+                    (modelOptions ? InvertModelMatrix(parentWorld) : glm::inverse(parentWorld)) *
+                    glm::make_mat4(objects[static_cast<std::size_t>(bone)].worldTransform);
+                if (modelOptions)
+                    RequireFiniteModelMatrix(local);
                 jointNodes[slot] = static_cast<int>(nodes.size());
                 nodes.push_back({{"name", ExportObjectName(objects[static_cast<std::size_t>(bone)])},
                                  {"matrix", ExportMatrix(local)},
@@ -879,8 +1188,11 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
             const std::size_t bindOffset = binary.size();
             for (const auto bone : bones)
             {
+                const glm::mat4 boneWorld = glm::make_mat4(objects[static_cast<std::size_t>(bone)].worldTransform);
                 const glm::mat4 inverseBind =
-                    glm::inverse(glm::make_mat4(objects[static_cast<std::size_t>(bone)].worldTransform)) * meshBind;
+                    (modelOptions ? InvertModelMatrix(boneWorld) : glm::inverse(boneWorld)) * meshBind;
+                if (modelOptions)
+                    RequireFiniteModelMatrix(inverseBind);
                 for (int column = 0; column < 4; ++column)
                     for (int row = 0; row < 4; ++row)
                         Put(binary, inverseBind[column][row]);
@@ -1005,6 +1317,8 @@ bool ExportSceneGlb(const BrxDocument &document, const std::filesystem::path &pa
         }
         gltf["scenes"] = json::array({{{"nodes", json::array({basisNode})}}});
         gltf["scene"] = 0;
+        if (modelOptions && modelOptions->format == ModelExportFormat::Obj)
+            return WriteSceneObj(gltf, binary, path, error);
         std::string text = gltf.dump();
         while ((text.size() & 3u) != 0)
             text.push_back(' ');
@@ -1066,4 +1380,26 @@ bool ExportGlobsetGlb(const BrxDocument &document, const std::size_t globsetInde
                       std::string &error)
 {
     return ExportSceneGlb(document, path, false, AllRecords, globsetIndex, false, error);
+}
+
+bool ExportGlobModel(const BrxDocument &document, const std::size_t globIndex, const std::filesystem::path &path,
+                     const ModelExportOptions &options, std::string &error)
+{
+    if (globIndex == AllRecords)
+    {
+        error = "Select a GLOB to export.";
+        return false;
+    }
+    return ExportSceneGlb(document, path, false, globIndex, AllRecords, false, error, &options);
+}
+
+bool ExportGlobsetModel(const BrxDocument &document, const std::size_t globsetIndex, const std::filesystem::path &path,
+                        const ModelExportOptions &options, std::string &error)
+{
+    if (globsetIndex == AllRecords)
+    {
+        error = "Select a model group to export.";
+        return false;
+    }
+    return ExportSceneGlb(document, path, false, AllRecords, globsetIndex, false, error, &options);
 }

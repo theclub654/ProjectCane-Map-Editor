@@ -1,4 +1,5 @@
 #include "SceneHierarchyPanel.h"
+#include "AssetBrowserPanel.h"
 
 #include "BrxDocument.h"
 #include "EditorDocumentOperations.h"
@@ -22,7 +23,7 @@
 void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const ImGuiWindowFlags panelFlags,
                              BrxDocument &document, const ResolvedScene &resolvedScene, SceneRenderer &sceneRenderer,
                              ImGuiTextFilter &objectFilter, std::int32_t &lastOutlinerObject, std::string &status,
-                             SceneHierarchyAction &action, const bool dockable)
+                             SceneHierarchyAction &action, const bool dockable, GLFWwindow *window)
 {
     action = {};
     if (!dockable)
@@ -49,6 +50,11 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
         // Follow selection automatically; clearing it restores the world tree.
         const bool focusedHierarchy = selectedObjectValid;
         static std::int32_t previouslyFocusedObject = -1;
+        static std::uint64_t previouslyFocusedRevision = 0;
+        static bool previouslyFocusedGlob = false;
+        static bool previouslyFocusedSubglob = false;
+        static std::uint32_t previouslyFocusedRenderGroup = 0;
+        static std::uint32_t previouslyFocusedFirstIndex = 0;
         static std::unordered_set<std::int32_t> collapsedHierarchyObjects;
         // Large retail worlds contain several thousand objects and GLOBs. The
         // hierarchy topology and GLOB ownership only change when ResolvedScene
@@ -64,6 +70,9 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
         static std::vector<std::vector<std::size_t>> cachedGlobIndicesByOwner;
         static std::unordered_set<std::int32_t> expandedGlobObjects;
         static bool hierarchyExpansionStateInitialized = false;
+        static std::array<bool, 148> typeFilters{};
+        static std::array<bool, 148> cachedTypeFilters{};
+        bool typeFilterActive = std::any_of(typeFilters.begin(), typeFilters.end(), [](bool value) { return value; });
         static std::int32_t renameObjectIndex = -1;
         static std::array<char, 128> renameObjectBuffer{};
         static bool requestRenamePopup = false;
@@ -86,8 +95,24 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
             }
             ImGui::EndDragDropTarget();
         };
-        const bool revealSelectedObject = selectedObjectValid && selectedObjectIndex != previouslyFocusedObject;
+        const bool selectedGlob = sceneRenderer.HasGlobSelection();
+        const bool selectedSubglob = sceneRenderer.HasSubglobSelection();
+        const auto selectedRenderGroup = sceneRenderer.SelectedRenderGroup();
+        const auto selectedFirstIndex = sceneRenderer.SelectedSubglobFirstIndex();
+        // Model-part picks can change while their owning CID stays selected.
+        // Reveal the exact row, including after a scene rebuild.
+        const bool revealSelectedObject = selectedObjectValid &&
+            (selectedObjectIndex != previouslyFocusedObject ||
+             resolvedScene.Revision() != previouslyFocusedRevision ||
+             selectedGlob != previouslyFocusedGlob || selectedSubglob != previouslyFocusedSubglob ||
+             (selectedGlob && selectedRenderGroup != previouslyFocusedRenderGroup) ||
+             (selectedSubglob && selectedFirstIndex != previouslyFocusedFirstIndex));
         previouslyFocusedObject = selectedObjectValid ? selectedObjectIndex : -1;
+        previouslyFocusedRevision = resolvedScene.Revision();
+        previouslyFocusedGlob = selectedGlob;
+        previouslyFocusedSubglob = selectedSubglob;
+        previouslyFocusedRenderGroup = selectedRenderGroup;
+        previouslyFocusedFirstIndex = selectedFirstIndex;
         std::int32_t focusedRootIndex = focusedHierarchy ? selectedObjectIndex : -1;
         if (selectedObjectValid)
         {
@@ -139,6 +164,8 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
             ImGui::TextDisabled("%zu direct child%s  |  Esc returns to the world", hierarchyChildren,
                                 hierarchyChildren == 1 ? "" : "ren");
             ImGui::EndChild();
+            if (typeFilterActive || objectFilter.IsActive())
+                ImGui::TextWrapped("World filters are paused while this hierarchy is focused. Clear selection to return to filtered results.");
             ImGui::Separator();
         }
 
@@ -152,6 +179,14 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                 ImGui::TextDisabled("%zu objects  |  %zu roots  |  %zu GLOBs", document.Objects().size(),
                                     resolvedScene.Roots().size(), document.Globs().size());
                 objectFilter.Draw("Search", -1.0f);
+                if (typeFilterActive || objectFilter.IsActive())
+                {
+                    if (ImGui::SmallButton("Clear all filters"))
+                    {
+                        typeFilters.fill(false);
+                        objectFilter.Clear();
+                    }
+                }
                 if (!objectFilter.IsActive())
                     ImGui::TextDisabled("Search names, types, or object IDs");
                 ImGui::Spacing();
@@ -181,13 +216,17 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                         if (cidCounts[cid] == 0)
                             continue;
                         const std::string className = BrxDocument::EditorClassName(static_cast<std::int16_t>(cid));
-                        ImGui::BulletText("%s", className.c_str());
+                        ImGui::PushID(static_cast<int>(cid));
+                        ImGui::Checkbox(className.c_str(), &typeFilters[cid]);
+                        ImGui::PopID();
                         ImGui::SameLine();
                         ImGui::TextDisabled("CID %zu  |  %zu object%s", cid, cidCounts[cid],
                                             cidCounts[cid] == 1 ? "" : "s");
                     }
                     ImGui::TreePop();
                 }
+                if (typeFilterActive)
+                    ImGui::TextWrapped("Showing checked object types. Expand Object type summary to change them.");
                 ImGui::SeparatorText("Objects");
             }
             else
@@ -195,6 +234,8 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                 ImGui::SeparatorText("Hierarchy");
             }
             ImGui::TextDisabled("Drag to reparent. Right-click to move, replace or delete.");
+            typeFilterActive = std::any_of(typeFilters.begin(), typeFilters.end(), [](bool value) { return value; });
+            const bool filterHierarchy = !focusedHierarchy && (typeFilterActive || objectFilter.IsActive());
             std::uint64_t collapseFingerprint = 1469598103934665603ull;
             for (const std::int32_t objectIndex : collapsedHierarchyObjects)
             {
@@ -218,7 +259,7 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
             // descendants remain discoverable beneath collapsed parents. The
             // common unfiltered view can reuse its flattened order.
             const bool rebuildDisplayOrder =
-                objectFilter.IsActive() || sceneCacheStale || cachedCollapseFingerprint != collapseFingerprint ||
+                typeFilters != cachedTypeFilters || filterHierarchy || sceneCacheStale || cachedCollapseFingerprint != collapseFingerprint ||
                 cachedFocusedRoot != focusedRootIndex || cachedFocusedHierarchy != focusedHierarchy ||
                 cachedFilterActive != objectFilter.IsActive();
             if (rebuildDisplayOrder)
@@ -233,7 +274,7 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                         return;
                     visited[static_cast<std::size_t>(objectIndex)] = true;
                     cachedDisplayOrder.emplace_back(objectIndex, depth);
-                    if (!objectFilter.IsActive() && collapsedHierarchyObjects.contains(objectIndex))
+                    if (!filterHierarchy && collapsedHierarchyObjects.contains(objectIndex))
                         return;
                     for (const auto child : resolvedScene.Children(objectIndex))
                         appendObject(child, depth + 1);
@@ -249,7 +290,7 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                         if (visited[index])
                             continue;
                         bool beneathCollapsedBranch = false;
-                        if (!objectFilter.IsActive())
+                        if (!filterHierarchy)
                         {
                             std::int32_t ancestor = document.Objects()[index].parentIndex;
                             for (std::size_t guard = 0; ancestor >= 0 &&
@@ -273,6 +314,7 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                 cachedFocusedRoot = focusedRootIndex;
                 cachedFocusedHierarchy = focusedHierarchy;
                 cachedFilterActive = objectFilter.IsActive();
+                cachedTypeFilters = typeFilters;
             }
             const auto &displayOrder = cachedDisplayOrder;
             const auto &globIndicesByOwner = cachedGlobIndicesByOwner;
@@ -287,7 +329,7 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
             std::size_t displayBegin = 0;
             std::size_t displayEnd = displayOrder.size();
             const bool virtualizeHierarchy = hierarchyExpansionStateInitialized && expandedGlobObjects.empty() &&
-                                             !objectFilter.IsActive() && !revealSelectedObject;
+                                             !filterHierarchy && !revealSelectedObject;
             if (virtualizeHierarchy && hierarchyRowHeight > 0.0f)
             {
                 const float visibleTop = ImGui::GetScrollY();
@@ -310,6 +352,10 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                 const auto [resolvedObjectIndex, depth] = displayOrder[displayIndex];
                 const auto objectIndex = static_cast<std::size_t>(resolvedObjectIndex);
                 const auto &object = document.Objects()[objectIndex];
+                if (!focusedHierarchy && typeFilterActive &&
+                    (object.cid < 0 || static_cast<std::size_t>(object.cid) >= typeFilters.size() ||
+                     !typeFilters[static_cast<std::size_t>(object.cid)]))
+                    continue;
                 ImGui::Indent(static_cast<float>(depth) * 12.0f);
                 const ImVec2 hierarchyRowStart = ImGui::GetCursorScreenPos();
                 if (depth > 0)
@@ -384,7 +430,11 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                     objectFlags |= ImGuiTreeNodeFlags_Selected;
                 if (!hasGlobs)
                     objectFlags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+                if (revealSelectedObject && selectedGlob && resolvedObjectIndex == selectedObjectIndex)
+                    ImGui::SetNextItemOpen(true);
                 const bool objectOpen = ImGui::TreeNodeEx(label.c_str(), objectFlags);
+                if (revealSelectedObject && !selectedGlob && resolvedObjectIndex == selectedObjectIndex)
+                    ImGui::SetScrollHereY(0.45f);
                 if (hasGlobs)
                 {
                     if (objectOpen)
@@ -416,6 +466,10 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                         ImGui::TextDisabled("%s", objectClassName.c_str());
                     ImGui::TextDisabled("CID %d  |  OID %d", object.cid, object.oid);
                     ImGui::Separator();
+                    if (ImGui::MenuItem("Help for this object"))
+                        action = {SceneHierarchyAction::Kind::OpenGuide, resolvedObjectIndex};
+                    if (ImGui::MenuItem("Review dependencies and duplicate...", nullptr, false, !objectLocked))
+                        action = {SceneHierarchyAction::Kind::ReviewDuplicate, resolvedObjectIndex};
                     ImGui::BeginDisabled(objectLocked);
                     if (ImGui::MenuItem("Move in viewport"))
                         action = {SceneHierarchyAction::Kind::MoveInViewport, resolvedObjectIndex};
@@ -558,8 +612,6 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                     ImGui::SameLine();
                     ImGui::TextDisabled("|  %zu child%s", directChildCount, directChildCount == 1 ? "" : "ren");
                 }
-                if (selected && revealSelectedObject)
-                    ImGui::SetScrollHereY(0.45f);
                 if (objectRowClicked && !objectOpenToggled && !objectLocked)
                 {
                     const std::int32_t clickedObject = static_cast<std::int32_t>(objectIndex);
@@ -602,7 +654,14 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                             (glob.editorName.empty() ? std::string{}
                                                      : "  [GLOB " + std::to_string(glob.renderGroup) + "]") +
                             " (" + std::to_string(glob.derivedBatches.size()) + " SUBGLOBs)";
+                        const bool revealGlob = revealSelectedObject && selectedGlob &&
+                                                resolvedObjectIndex == selectedObjectIndex &&
+                                                glob.renderGroup == selectedRenderGroup;
+                        if (revealGlob && selectedSubglob)
+                            ImGui::SetNextItemOpen(true);
                         const bool globOpen = ImGui::TreeNodeEx(globLabel.c_str(), globFlags);
+                        if (revealGlob && !selectedSubglob)
+                            ImGui::SetScrollHereY(0.45f);
                         if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen() && !globLocked)
                         {
                             if (ImGui::GetIO().KeyCtrl)
@@ -610,6 +669,23 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                             else
                                 sceneRenderer.SelectRenderGroup(glob.renderGroup);
                             status = std::to_string(sceneRenderer.SelectionCount()) + " GLOB(s) selected.";
+                        }
+                        if (ImGui::BeginPopupContextItem("GlobContextMenu"))
+                        {
+                            if (ImGui::MenuItem("Copy GLOB to object..."))
+                            {
+                                action = {SceneHierarchyAction::Kind::CopyGlobToObject, resolvedObjectIndex};
+                                action.globIndex = globIndex;
+                            }
+                            DrawModelExportButton(document, globIndex, false, document.GlobEditorLabel(globIndex),
+                                                  window, status, "Export GLOB...");
+                            if (ImGui::MenuItem("Delete GLOB...", nullptr, false,
+                                                !globLocked && !sceneRenderer.IsObjectLocked(resolvedObjectIndex)))
+                            {
+                                action = {SceneHierarchyAction::Kind::DeleteGlob, resolvedObjectIndex};
+                                action.globIndex = globIndex;
+                            }
+                            ImGui::EndPopup();
                         }
                         if (globOpen && !glob.derivedBatches.empty())
                         {
@@ -647,6 +723,8 @@ void DrawSceneHierarchyPanel(const ImVec2 &position, const ImVec2 &size, const I
                                         sceneRenderer.SelectSubglob(glob.renderGroup, batch.firstIndex);
                                     status = std::to_string(sceneRenderer.SelectionCount()) + " SUBGLOB(s) selected.";
                                 }
+                                if (revealGlob && selectedSubglob && batch.firstIndex == selectedFirstIndex)
+                                    ImGui::SetScrollHereY(0.45f);
                                 ImGui::PopID();
                             }
                             ImGui::TreePop();

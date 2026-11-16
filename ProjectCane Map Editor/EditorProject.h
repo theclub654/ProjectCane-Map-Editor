@@ -14,9 +14,10 @@ class EditorProject
     // editor-only GLOB/SUBGLOB names. It carries every
     // decoded/editor-owned record needed by the structured BRX compiler and
     // no longer needs a matching source BRX to fill omitted arrays.
-    // v22 separates EXPLG's embedded context OID from the ordinary splice
-    // index stored in other LO headers.
-    static constexpr std::uint32_t CurrentVersion = 21;
+    // v22 preserves PAL language worlds and language-specific subtitle edits.
+    // v23 retains the default world's PLOC localization table as well.
+    // v24 adds per-language voice references and self-contained imported WAVs.
+    static constexpr std::uint32_t CurrentVersion = 24;
 
     [[nodiscard]] static std::filesystem::path DefaultPathFor(const BrxDocument &document);
     static bool Save(const std::filesystem::path &path, const BrxDocument &document, std::string &error);

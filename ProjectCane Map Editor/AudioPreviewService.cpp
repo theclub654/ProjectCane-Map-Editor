@@ -1,4 +1,5 @@
 #include "AudioPreviewService.h"
+#include "BrxDocument.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -13,6 +14,8 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -168,6 +171,12 @@ std::filesystem::path AudioPreviewService::ResolveDialogWave(const std::string &
 {
     if (resourceName.empty())
         return {};
+    if (dialogLanguage_ >= 0)
+    {
+        for (const auto &path : LocalizedDialogCandidates(resourceName))
+        { std::error_code ec; if (std::filesystem::is_regular_file(path, ec)) return path; }
+        return {}; // Never fall back into a different PAL language or level.
+    }
     if (documentPath_.parent_path() != g_indexRoot)
         RebuildIndex();
 
@@ -199,6 +208,13 @@ std::filesystem::path AudioPreviewService::ResolveEffectWave(const std::int32_t 
 
 std::size_t AudioPreviewService::MatchCount(const std::string &resourceName) const
 {
+    if (dialogLanguage_ >= 0)
+    {
+        std::size_t count = 0;
+        for (const auto &path : LocalizedDialogCandidates(resourceName))
+        { std::error_code ec; if (std::filesystem::is_regular_file(path, ec)) ++count; }
+        return count;
+    }
     auto requested = ResourcePath(resourceName);
     requested.replace_extension(".wav");
     const auto found = g_waveByName.find(Lower(requested.filename().string()));
@@ -364,6 +380,7 @@ void AudioPreviewService::Stop()
     open_ = false;
     playingPath_.clear();
     waveform_.clear();
+    CleanupTemporaryWave();
 }
 
 bool AudioPreviewService::IsPlaying()
@@ -388,3 +405,5 @@ float AudioPreviewService::DurationSeconds() const
 #else
 #include "AudioPreviewLinuxMethods.inc"
 #endif
+
+#include "AudioPreviewDialog.inc"

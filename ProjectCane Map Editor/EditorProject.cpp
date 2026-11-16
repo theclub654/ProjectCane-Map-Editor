@@ -24,6 +24,18 @@ constexpr std::uint32_t kMaximumRecords = 4'000'000;
 constexpr std::uint32_t kMaximumString = 16 * 1024 * 1024;
 constexpr std::uint32_t kMaximumBlobBytes = 256 * 1024 * 1024;
 
+std::uint32_t LanguagePayloadCrc(const std::vector<std::uint8_t> &bytes)
+{
+    std::uint32_t crc = 0xffffffffu;
+    for (const auto byte : bytes)
+    {
+        crc ^= byte;
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+
 class Writer
 {
   public:
@@ -1329,7 +1341,70 @@ bool EditorProject::Save(const std::filesystem::path &path, const BrxDocument &d
         error = "The editor project has more than 32 VISMAP zone names.";
         return false;
     }
+    std::uint32_t languageMask = 0;
+    std::vector<std::uint8_t> checkedFooter;
+    if (document.LocalizationFooter().size() > kMaximumBlobBytes)
+    {
+        error = "The localization footer exceeds the editor project's size limit.";
+        return false;
+    }
+    if (!BrxDocument::ExtractLocalizationFooter(document.LocalizationFooter(), checkedFooter, error))
+        return false;
+    if (checkedFooter != document.LocalizationFooter())
+    {
+        error = "The project's localization footer contains unrecognized leading data.";
+        return false;
+    }
+    for (const auto &language : document.Languages())
+    {
+        if (language.languageId > 4 || (languageMask & (1u << language.languageId)) != 0 ||
+            !language.payload || language.payload->size() < 8 || language.payload->size() > kMaximumBlobBytes ||
+            LanguagePayloadCrc(*language.payload) != language.payloadCrc)
+        {
+            error = "A preserved PAL language payload is missing, damaged or too large for the editor project.";
+            return false;
+        }
+        languageMask |= 1u << language.languageId;
+        std::unordered_set<std::uint64_t> keys;
+        for (const auto &voice : language.voiceLines)
+        {
+            if (!voice.modified) continue;
+            const auto key = (static_cast<std::uint64_t>(voice.objectIndex) << 32u) | voice.eventIndex;
+            if (language.languageId == document.DefaultLanguage() || !keys.insert(key).second ||
+                !BrxDocument::ValidateDialogVoiceResource(voice.resourceName, error))
+            { if (error.empty()) error = "A PAL voice reference is invalid or duplicated."; return false; }
+        }
+        for (const auto &line : language.subtitles)
+        {
+            if (!line.modified)
+                continue;
+            const auto key = (static_cast<std::uint64_t>(line.objectIndex) << 32u) | line.eventIndex;
+            if (language.languageId == document.DefaultLanguage() || !keys.insert(key).second ||
+                line.subtitle.size() > 65535u || line.subtitle.find('\0') != std::string::npos)
+            {
+                error = "A PAL subtitle edit has an invalid language, duplicate event, or unsupported text length.";
+                return false;
+            }
+        }
+    }
+    if (!document.Languages().empty() &&
+        (document.DefaultLanguage() > 4 || (languageMask & (1u << document.DefaultLanguage())) == 0))
+    {
+        error = "The PAL default language is missing.";
+        return false;
+    }
     Writer writer(path);
+    std::unordered_set<std::string> waveKeys;
+    for (const auto &asset : document.DialogWaves())
+    {
+        const auto key = std::to_string(asset.languageId) + ":" + asset.resourceName;
+        if (asset.languageId > 4 || (languageMask & (1u << asset.languageId)) == 0 || !waveKeys.insert(key).second ||
+            !asset.bytes || LanguagePayloadCrc(*asset.bytes) != asset.crc ||
+            !BrxDocument::ValidateDialogVoiceResource(asset.resourceName, error) ||
+            std::filesystem::path(asset.resourceName).extension() != ".wav" ||
+            !BrxDocument::ValidateDialogWave(*asset.bytes, error))
+        { if (error.empty()) error = "A staged dialogue WAV is invalid or duplicated."; return false; }
+    }
     if (!writer.Good())
     {
         error = "Could not create the staged editor project; the previous project was retained.";
@@ -1437,6 +1512,51 @@ bool EditorProject::Save(const std::filesystem::path &path, const BrxDocument &d
     writer.Pod(visibilityNameCount);
     for (const auto &name : document.VisibilityZoneNames())
         writer.String(name);
+    writer.Pod(document.DefaultLanguage());
+    writer.Pod(static_cast<std::uint32_t>(document.Languages().size()));
+    for (const auto &language : document.Languages())
+    {
+        writer.Pod(language.languageId);
+        writer.Pod(language.payloadCrc);
+        writer.Pod(static_cast<std::uint32_t>(language.payload->size()));
+        writer.Bytes(language.payload->data(), language.payload->size());
+        const auto count = static_cast<std::uint32_t>(std::count_if(language.subtitles.begin(), language.subtitles.end(),
+                                                                  [](const auto &line) { return line.modified; }));
+        writer.Pod(count);
+        for (const auto &line : language.subtitles)
+        {
+            if (!line.modified)
+                continue;
+            writer.Pod(line.objectIndex);
+            writer.Pod(line.eventIndex);
+            writer.Pod(line.dialogOid);
+            writer.String(line.subtitle);
+        }
+    }
+    writer.Pod(static_cast<std::uint32_t>(document.LocalizationFooter().size()));
+    writer.Pod(LanguagePayloadCrc(document.LocalizationFooter()));
+    if (!document.LocalizationFooter().empty())
+        writer.Bytes(document.LocalizationFooter().data(), document.LocalizationFooter().size());
+    writer.Pod(static_cast<std::uint32_t>(document.Languages().size()));
+    for (const auto &language : document.Languages())
+    {
+        writer.Pod(language.languageId);
+        writer.Pod(static_cast<std::uint32_t>(std::count_if(language.voiceLines.begin(), language.voiceLines.end(),
+                                                         [](const auto &voice) { return voice.modified; })));
+        for (const auto &voice : language.voiceLines)
+        {
+            if (!voice.modified) continue;
+            writer.Pod(voice.objectIndex); writer.Pod(voice.eventIndex); writer.Pod(voice.dialogOid);
+            writer.String(voice.resourceName);
+        }
+    }
+    writer.Pod(static_cast<std::uint32_t>(document.DialogWaves().size()));
+    for (const auto &asset : document.DialogWaves())
+    {
+        writer.Pod(asset.languageId); writer.String(asset.resourceName); writer.Pod(asset.crc);
+        writer.Pod(static_cast<std::uint32_t>(asset.bytes->size()));
+        writer.Bytes(asset.bytes->data(), asset.bytes->size());
+    }
     return writer.Commit(error);
 }
 
@@ -1845,6 +1965,142 @@ bool EditorProject::Load(const std::filesystem::path &path, BrxDocument &documen
         visibilityNodes = document.VisibilityNodes();
         visibilityOneHopMasks = document.VisibilityOneHopMasks();
     }
+    std::uint32_t defaultLanguage = 0;
+    std::vector<BrxLanguagePayload> languages;
+    if (version >= 22)
+    {
+        std::uint32_t count = 0, languageMask = 0;
+        if (!reader.Pod(defaultLanguage) || !reader.Pod(count) || count > 5 || defaultLanguage > 4)
+        {
+            error = "The editor project's PAL language header is damaged.";
+            return false;
+        }
+        languages.resize(count);
+        for (auto &language : languages)
+        {
+            std::uint32_t size = 0, editCount = 0;
+            if (!reader.Pod(language.languageId) || language.languageId > 4 ||
+                (languageMask & (1u << language.languageId)) != 0 ||
+                !reader.Pod(language.payloadCrc) || !reader.Pod(size) || size < 8 || size > kMaximumBlobBytes)
+            {
+                error = "A preserved PAL language descriptor is damaged.";
+                return false;
+            }
+            languageMask |= 1u << language.languageId;
+            auto payload = std::make_shared<std::vector<std::uint8_t>>(size);
+            if (!reader.Bytes(payload->data(), payload->size()) || LanguagePayloadCrc(*payload) != language.payloadCrc)
+            {
+                error = "A preserved PAL language payload failed its integrity check.";
+                return false;
+            }
+            std::uint32_t magic{}, payloadVersion{};
+            std::memcpy(&magic, payload->data(), 4);
+            std::memcpy(&payloadVersion, payload->data() + 4, 4);
+            if (magic != 0x52424350u || payloadVersion != 17 || !reader.Pod(editCount) || editCount > kMaximumRecords ||
+                (language.languageId == defaultLanguage && editCount != 0))
+            {
+                error = "A preserved PAL world or subtitle edit count is invalid.";
+                return false;
+            }
+            language.reconstructedSize = size;
+            language.payload = std::move(payload);
+            std::unordered_set<std::uint64_t> keys;
+            language.subtitles.resize(editCount);
+            for (auto &line : language.subtitles)
+            {
+                if (!reader.Pod(line.objectIndex) || !reader.Pod(line.eventIndex) || !reader.Pod(line.dialogOid) ||
+                    !reader.String(line.subtitle) || line.subtitle.size() > 65535u ||
+                    line.subtitle.find('\0') != std::string::npos ||
+                    !keys.insert((static_cast<std::uint64_t>(line.objectIndex) << 32u) | line.eventIndex).second)
+                {
+                    error = "A PAL subtitle edit is damaged or duplicated.";
+                    return false;
+                }
+                line.modified = true;
+            }
+        }
+        if (count != 0 && (languageMask & (1u << defaultLanguage)) == 0)
+        {
+            error = "The editor project's default PAL language is missing.";
+            return false;
+        }
+    }
+    std::vector<std::uint8_t> localizationFooter;
+    if (version >= 23)
+    {
+        std::uint32_t size = 0, crc = 0;
+        if (!reader.Pod(size) || !reader.Pod(crc) || size > kMaximumBlobBytes)
+        {
+            error = "The editor project's localization footer header is invalid.";
+            return false;
+        }
+        localizationFooter.resize(size);
+        std::vector<std::uint8_t> checked;
+        if ((!localizationFooter.empty() && !reader.Bytes(localizationFooter.data(), localizationFooter.size())) ||
+            LanguagePayloadCrc(localizationFooter) != crc ||
+            !BrxDocument::ExtractLocalizationFooter(localizationFooter, checked, error) || checked != localizationFooter)
+        {
+            if (error.empty())
+                error = "The editor project's localization footer is damaged.";
+            return false;
+        }
+    }
+    else if (version == 22 && !languages.empty())
+    {
+        const auto base = std::find_if(languages.begin(), languages.end(),
+                                       [&](const auto &language) { return language.languageId == defaultLanguage; });
+        if (base == languages.end() || !BrxDocument::ExtractLocalizationFooter(*base->payload, localizationFooter, error))
+            return false;
+    }
+    std::vector<BrxDialogWaveAsset> dialogWaves;
+    if (version >= 24)
+    {
+        std::uint32_t groups = 0;
+        if (!reader.Pod(groups) || groups != languages.size())
+        { error = "The PAL voice-language table is invalid."; return false; }
+        std::unordered_set<std::uint32_t> groupIds;
+        for (std::uint32_t group = 0; group < groups; ++group)
+        {
+            std::uint32_t id = 0, count = 0;
+            if (!reader.Pod(id) || !reader.Pod(count) || count > kMaximumRecords || !groupIds.insert(id).second)
+            { error = "The PAL voice edit count is invalid."; return false; }
+            auto language = std::find_if(languages.begin(), languages.end(), [&](const auto &item) { return item.languageId == id; });
+            if (language == languages.end() || (id == defaultLanguage && count != 0))
+            { error = "A PAL voice edit references an invalid language."; return false; }
+            std::unordered_set<std::uint64_t> keys;
+            language->voiceLines.resize(count);
+            for (auto &voice : language->voiceLines)
+            {
+                if (!reader.Pod(voice.objectIndex) || !reader.Pod(voice.eventIndex) || !reader.Pod(voice.dialogOid) ||
+                    !reader.String(voice.resourceName) || !BrxDocument::ValidateDialogVoiceResource(voice.resourceName, error) ||
+                    !keys.insert((static_cast<std::uint64_t>(voice.objectIndex) << 32u) | voice.eventIndex).second)
+                { if (error.empty()) error = "A PAL voice edit is damaged or duplicated."; return false; }
+                voice.modified = true;
+            }
+        }
+        std::uint32_t count = 0;
+        if (!reader.Pod(count) || count > kMaximumRecords)
+        { error = "The imported WAV count is invalid."; return false; }
+        std::unordered_set<std::string> keys;
+        for (std::uint32_t index = 0; index < count; ++index)
+        {
+            BrxDialogWaveAsset asset;
+            std::uint32_t size = 0;
+            if (!reader.Pod(asset.languageId) || !reader.String(asset.resourceName) || !reader.Pod(asset.crc) ||
+                !reader.Pod(size) || size < 12 || size > kMaximumBlobBytes ||
+                std::none_of(languages.begin(), languages.end(), [&](const auto &item) { return item.languageId == asset.languageId; }) ||
+                !BrxDocument::ValidateDialogVoiceResource(asset.resourceName, error) ||
+                std::filesystem::path(asset.resourceName).extension() != ".wav" ||
+                !keys.insert(std::to_string(asset.languageId) + ":" + asset.resourceName).second)
+            { if (error.empty()) error = "An imported WAV descriptor is invalid."; return false; }
+            auto bytes = std::make_shared<std::vector<std::uint8_t>>(size);
+            if (!reader.Bytes(bytes->data(), bytes->size()) || LanguagePayloadCrc(*bytes) != asset.crc ||
+                !BrxDocument::ValidateDialogWave(*bytes, error))
+            { if (error.empty()) error = "An imported WAV failed its integrity check."; return false; }
+            asset.bytes = std::move(bytes);
+            dialogWaves.push_back(std::move(asset));
+        }
+    }
     if (version < 9 && objects.size() == document.Objects().size())
     {
         // Source ranges are immutable properties of the bound BRX. Recover
@@ -1900,6 +2156,15 @@ bool EditorProject::Load(const std::filesystem::path &path, BrxDocument &documen
         document.payloadValidated_ = true;
     }
     document.EditableWorldHeader() = worldHeader;
+    if (version >= 17)
+    {
+        document.defaultLanguage_ = defaultLanguage;
+        document.languages_ = std::move(languages);
+        document.localizationFooter_ = std::move(localizationFooter);
+        document.dialogWaves_ = std::move(dialogWaves);
+        if (!document.languages_.empty())
+            document.version_ = 19;
+    }
     document.EditableWorldOptions() = std::move(worldOptions);
     document.EditableObjects() = std::move(objects);
     document.EditableBitmaps() = std::move(bitmaps);
@@ -2009,6 +2274,13 @@ bool EditorProject::SaveHierarchy(const std::filesystem::path &path, const BrxDo
         return false;
     }
     BrxDocument package = document;
+    // Hierarchy packages carry the selected world's hierarchy, not unrelated
+    // complete PAL worlds or their translation edits.
+    package.languages_.clear();
+    package.dialogWaves_.clear();
+    package.localizationFooter_.clear();
+    package.defaultLanguage_ = 0;
+    package.version_ = 17;
     constexpr const char *marker = "__CaneHierarchyPackageRoot__";
     for (auto &object : package.EditableObjects())
         if (object.editorName == marker)
@@ -2095,6 +2367,11 @@ bool EditorProject::SavePortableProxy(const std::filesystem::path &path, const B
         return false;
     }
     BrxDocument package = document;
+    package.languages_.clear();
+    package.dialogWaves_.clear();
+    package.localizationFooter_.clear();
+    package.defaultLanguage_ = 0;
+    package.version_ = 17;
     const auto &selected = package.Objects()[static_cast<std::size_t>(selectedObjectIndex)];
     std::int32_t proxyIndex = selected.proxyRecordIndex;
     if (proxyIndex < 0)

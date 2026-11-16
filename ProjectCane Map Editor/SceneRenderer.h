@@ -80,7 +80,11 @@ class SceneRenderer
     {
         glm::mat4 model{1.0f};
         glm::vec4 objectCenter{};
+        glm::vec4 lightingSphere{};
     };
+    static_assert(offsetof(GlobInstance, objectCenter) == 64 &&
+                  offsetof(GlobInstance, lightingSphere) == 80 && sizeof(GlobInstance) == 96,
+                  "GlobInstance must match RenderShaders' std430 layout");
     struct EmitterRenderDiagnostics
     {
         std::size_t simulatedParticles = 0;
@@ -705,11 +709,14 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
         for (std::size_t lightIndex = 0; lightIndex < lights_.size(); ++lightIndex)
         {
             const auto &light = lights_[lightIndex];
+            const bool visible =
+                lightIndex >= lightOwnerIndices_.size() || !IsGameplayPreviewHidden(lightOwnerIndices_[lightIndex]);
             const bool isolated = lightIsolationOwner_ < 0 || (lightIndex < lightOwnerIndices_.size() &&
                                                                lightOwnerIndices_[lightIndex] == lightIsolationOwner_);
             GpuLightBlock block{};
             block.meta =
-                glm::ivec4(light.kind, light.excludeDynamicObjects ? 1 : 0, isolated ? 1 : 0, light.dynamic ? 1 : 0);
+                glm::ivec4(light.kind, light.excludeDynamicObjects ? 1 : 0, visible && isolated ? 1 : 0,
+                           light.dynamic ? 1 : 0);
             block.position = glm::vec4(light.position, 1.0f);
             block.direction = glm::vec4(light.direction, 0.0f);
             block.color = glm::vec4(light.color, 1.0f);
@@ -2025,10 +2032,15 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
     }
     void SetObjectEditorVisible(const std::int32_t objectIndex, const bool visible)
     {
+        const bool wasHidden = hiddenObjectSelections_.contains(objectIndex);
         if (visible)
             hiddenObjectSelections_.erase(objectIndex);
         else
             hiddenObjectSelections_.insert(objectIndex);
+        // A stopped particle preview otherwise never revisits the visible
+        // emitter list. Hide/Show must rebuild that frozen snapshot once.
+        if (wasHidden == visible && !emitterPreview_.Playing())
+            emitterPreview_.InvalidateSnapshot();
     }
     void SetGlobEditorVisible(const std::uint32_t renderGroup, const bool visible)
     {
@@ -2184,7 +2196,8 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
     void HideSelection()
     {
         if (selectionScope_ == SelectionScope::Object)
-            hiddenObjectSelections_.insert(selectedObjectIndices_.begin(), selectedObjectIndices_.end());
+            for (const auto object : selectedObjectIndices_)
+                SetObjectEditorVisible(object, false);
         else if (selectionScope_ == SelectionScope::Glob)
             hiddenGlobSelections_.insert(selectedRenderGroups_.begin(), selectedRenderGroups_.end());
         else if (selectionScope_ == SelectionScope::Subglob)
@@ -2210,8 +2223,25 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
         isolationRenderGroup_ = selectedRenderGroup_;
         isolationSubglobFirstIndex_ = selectedSubglobFirstIndex_;
     }
+    void ForgetDeletedGlob(const std::uint32_t group)
+    {
+        hiddenGlobSelections_.erase(group);
+        lockedGlobSelections_.erase(group);
+        std::erase_if(hiddenSubglobSelections_, [group](const std::uint64_t key)
+            { return static_cast<std::uint32_t>(key >> 32) == group; });
+        std::erase_if(lockedSubglobSelections_, [group](const std::uint64_t key)
+            { return static_cast<std::uint32_t>(key >> 32) == group; });
+        if ((isolationScope_ == SelectionScope::Glob || isolationScope_ == SelectionScope::Subglob) &&
+            (isolationUsesSelection_ || isolationRenderGroup_ == group))
+        {
+            isolationScope_ = SelectionScope::None;
+            isolationUsesSelection_ = false;
+        }
+    }
     void ShowAllSelections()
     {
+        if (!hiddenObjectSelections_.empty() && !emitterPreview_.Playing())
+            emitterPreview_.InvalidateSnapshot();
         hiddenObjectSelections_.clear();
         hiddenGlobSelections_.clear();
         hiddenSubglobSelections_.clear();
@@ -3237,6 +3267,7 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
             const GLint dynamicObjectLocation = glGetUniformLocation(program_, "uDynamicObject");
             const GLint objectCenterLocation = glGetUniformLocation(program_, "uObjectCenter");
             const GLint objectRadiusLocation = glGetUniformLocation(program_, "uObjectRadius");
+            const GLint lightingSphereLocation = glGetUniformLocation(program_, "uLightingSphere");
             const GLint activeLightCountLocation = glGetUniformLocation(program_, "uActiveLightCount");
             const GLint activeLightIndicesLocation = glGetUniformLocation(program_, "uActiveLightIndices[0]");
             std::array<GLint, 256> activeLightIndices{};
@@ -3327,6 +3358,19 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
                 glBindTexture(GL_TEXTURE_2D, texture);
                 boundMaterialTextures[unit] = texture;
             };
+            const auto lightingSphereForBatch = [&](const BrxRenderBatch &batch)
+            {
+                // RenderMsGlobset/RenderAloGlobset fill RO::posCenter/sRadius
+                // from the GLOB. These placed bounds already include editor
+                // instance placement and do not rotate with RTCK geometry.
+                const glm::mat4 placement = SubmissionTransformForObject(batch.ownerObjectIndex);
+                glm::vec4 sphere = placement *
+                    glm::vec4(batch.sortCenter[0], batch.sortCenter[1], batch.sortCenter[2], 1.0f);
+                sphere.w = batch.mrdRadius * (std::max)({glm::length(glm::vec3(placement[0])),
+                                                        glm::length(glm::vec3(placement[1])),
+                                                        glm::length(glm::vec3(placement[2])), 0.0001f});
+                return sphere;
+            };
             const auto drawBatch = [&](const BrxRenderBatch &batch, int alphaPass, float alphaCutoff,
                                        bool forceWhiteDiffuse = false, bool preserveProjectedColor = false,
                                        const glm::mat4 *modelOverride = nullptr, float alphaMultiplier = 1.0f,
@@ -3351,13 +3395,20 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
                 glUniformMatrix4fv(modelLocation, 1, GL_FALSE, glm::value_ptr(model));
                 glUniform1i(dynamicObjectLocation, batch.dynamicLighting ? 1 : 0);
                 glUniform1i(shadowReceiverLocation, batch.shadowReceiverMask);
-                const glm::vec3 lightingCenter = glm::vec3(
+                const glm::vec3 receiverCenter = glm::vec3(
                     model * glm::vec4(batch.boundsCenter[0], batch.boundsCenter[1], batch.boundsCenter[2], 1.0f));
-                glUniform3fv(objectCenterLocation, 1, glm::value_ptr(lightingCenter));
-                const float lightingRadius =
+                glUniform3fv(objectCenterLocation, 1, glm::value_ptr(receiverCenter));
+                const float receiverRadius =
                     batch.boundsRadius * (std::max)({glm::length(glm::vec3(model[0])), glm::length(glm::vec3(model[1])),
                                                      glm::length(glm::vec3(model[2])), 0.0001f});
-                glUniform1f(objectRadiusLocation, lightingRadius);
+                glUniform1f(objectRadiusLocation, receiverRadius);
+                // Effects can submit a stock model at a different location
+                // (laser lines, fast shadows and RIP model particles). Keep
+                // their existing override-space lighting; authored GLOB bounds
+                // describe the source object, not that temporary copy.
+                const glm::vec4 lightingSphere = modelOverride != nullptr
+                    ? glm::vec4(receiverCenter, receiverRadius) : lightingSphereForBatch(batch);
+                glUniform4fv(lightingSphereLocation, 1, glm::value_ptr(lightingSphere));
                 // ProjectCane builds a compact light list once per GLOB before
                 // vertex submission. The old editor passed the entire zone
                 // list and repeated the same sphere rejection for every
@@ -3383,8 +3434,8 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
                         bool intersects = light.kind == 0 || light.maximumDistance <= 0.0f;
                         if (!intersects)
                         {
-                            const glm::vec3 centerToLight = light.position - lightingCenter;
-                            const float reach = light.maximumDistance + lightingRadius;
+                            const glm::vec3 centerToLight = light.position - glm::vec3(lightingSphere);
+                            const float reach = light.maximumDistance + lightingSphere.w;
                             intersects = glm::dot(centerToLight, centerToLight) <= reach * reach;
                         }
                         if (intersects)
@@ -4112,6 +4163,7 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
                         {
                             GlobInstance instance;
                             instance.model = rtckModelForBatch(*member);
+                            instance.lightingSphere = lightingSphereForBatch(*member);
                             instance.objectCenter =
                                 instance.model * glm::vec4(member->boundsCenter[0], member->boundsCenter[1],
                                                            member->boundsCenter[2], 1.0f);
@@ -4167,6 +4219,7 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
                             {
                                 GlobInstance instance;
                                 instance.model = rtckModelForBatch(*instanceBatch);
+                                instance.lightingSphere = lightingSphereForBatch(*instanceBatch);
                                 instance.objectCenter =
                                     instance.model * glm::vec4(instanceBatch->boundsCenter[0],
                                                                instanceBatch->boundsCenter[1],
@@ -4737,15 +4790,18 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
                     continue;
                 const std::int32_t logicalOwner = ResolveLogicalOwner(triangle.ownerObjectIndex);
                 if (collisionOwnerFilter != (std::numeric_limits<std::int32_t>::min)() &&
-                    (collisionOwnerFilter < 0 || logicalOwner != collisionOwnerFilter))
+                    (collisionOwnerFilter < 0 || (logicalOwner != collisionOwnerFilter &&
+                                                 triangle.ownerObjectIndex != collisionOwnerFilter)))
                     continue;
-                const bool selected = logicalOwner == selectedObjectIndex_ || IsObjectSelected(logicalOwner);
+                const bool selected = logicalOwner == selectedObjectIndex_ || IsObjectSelected(logicalOwner) ||
+                                      triangle.ownerObjectIndex == selectedObjectIndex_ ||
+                                      IsObjectSelected(triangle.ownerObjectIndex);
                 float color[4]{};
                 std::copy_n(triangle.cameraGeometry ? cameraCollisionColor : gameplayCollisionColor, 4, color);
-                if (!triangle.cameraGeometry && logicalOwner >= 0 &&
-                    static_cast<std::size_t>(logicalOwner) < objects_.size())
+                if (!triangle.cameraGeometry && triangle.ownerObjectIndex >= 0 &&
+                    static_cast<std::size_t>(triangle.ownerObjectIndex) < objects_.size())
                 {
-                    const auto &collisionOwner = objects_[static_cast<std::size_t>(logicalOwner)];
+                    const auto &collisionOwner = objects_[static_cast<std::size_t>(triangle.ownerObjectIndex)];
                     int groupIndex = -1;
                     if (collisionColorMode == 1 && collisionOwner.so.present)
                     {
@@ -5058,14 +5114,16 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
                      usage);
     }
 
-    void CopyShadowTextureLayer(GLuint source, int layer)
+    bool CopyShadowTextureLayer(GLuint source, int layer)
     {
+        if (source == 0 || shadowTextureArray_ == 0 || layer < 0)
+            return false;
         GLint width = 0, height = 0;
         glBindTexture(GL_TEXTURE_2D, source);
         glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
         glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
         if (width <= 0 || height <= 0)
-            return;
+            return false;
 
         // Retail texture uploads are available to the shadow copier as
         // renderable RGBA images. The editor retains DXT-compressed source
@@ -5092,6 +5150,7 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
         glBindTexture(GL_TEXTURE_2D_ARRAY, shadowTextureArray_);
         glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, layer, shadowResolution_, shadowResolution_, 1, GL_RGBA,
                         GL_UNSIGNED_BYTE, layerPixels.data());
+        return true;
     }
 
     void BuildProjectedShadows()
@@ -5294,11 +5353,16 @@ void main() { oColor=vec4(1.0,1.0,1.0,vAlpha); }
                     projectedShadows_.back().depth.w = 1.0f;
                 }
             }
-            if (projectedShadows_.back().depth.w == 0.0f && !sh->diffuseBitmapIndices.empty())
+            if (projectedShadows_.back().depth.w == 0.0f)
             {
-                int bmp = sh->diffuseBitmapIndices[0];
-                if (bmp >= 0 && static_cast<std::size_t>(bmp) < textures_.size())
-                    CopyShadowTextureLayer(textures_[bmp], layer);
+                const int bmp = sh->diffuseBitmapIndices.empty() ? -1 : sh->diffuseBitmapIndices[0];
+                // PrepareSwShadows never submits an unbound shadow texture.
+                // glTexStorage3D leaves texels undefined until populated;
+                // exposing an uncopied layer makes shading depend on the
+                // previous contents of GPU memory, including on first load.
+                if (bmp < 0 || static_cast<std::size_t>(bmp) >= textures_.size() ||
+                    !CopyShadowTextureLayer(textures_[bmp], layer))
+                    projectedShadows_.pop_back();
             }
         }
         // Caster hierarchy membership is structural. Resolve it once when the

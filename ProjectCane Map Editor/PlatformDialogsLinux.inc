@@ -91,6 +91,11 @@ std::filesystem::path ChooseNamedGlbSaveFile(GLFWwindow *, const std::string &na
     if (suggested.extension() != ".glb") suggested += ".glb";
     return LinuxChooseFile("Export binary glTF", GTK_FILE_CHOOSER_ACTION_SAVE, {"*.glb"}, suggested);
 }
+std::filesystem::path ChooseModelSaveFile(GLFWwindow *window, const std::string &name, const bool obj)
+{
+    return obj ? LinuxChooseFile("Export selected model as OBJ", GTK_FILE_CHOOSER_ACTION_SAVE, {"*.obj"}, name + ".obj")
+               : ChooseNamedGlbSaveFile(window, name);
+}
 std::filesystem::path ChooseExportFolder(GLFWwindow *, const wchar_t *title)
 {
     std::string caption;

@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -3617,6 +3619,12 @@ bool BuildRebuiltPayload(const BrxDocument &document, std::vector<std::uint8_t> 
         error = "The document is not configured as a PCBRX v17 world.";
         return false;
     }
+    if (std::any_of(document.Sections().begin(), document.Sections().end(),
+                    [](const auto &section) { return section.state == BrxSectionState::Pending; }))
+    {
+        error = "The world is only partially decoded; refusing to discard unread data during rebuild.";
+        return false;
+    }
     // General editor validation includes gameplay diagnostics such as missing
     // runtime/global OIDs.  Those are useful authoring warnings, but are not a
     // reason to disable a structurally valid BRX round trip.  Enforce the
@@ -3626,6 +3634,15 @@ bool BuildRebuiltPayload(const BrxDocument &document, std::vector<std::uint8_t> 
         const auto &object = document.Objects()[index];
         if (object.proxyClone)
             continue;
+        // Project snapshots retain this flag even though source-section
+        // diagnostics are not serialized. A stopped source loader is not a
+        // complete authored object that the structured writer can recreate.
+        if (object.offset != 0 && !object.loaderImplemented)
+        {
+            error = "A source object was not completely decoded: CID " + std::to_string(object.cid) +
+                    " OID " + std::to_string(object.oid) + ".";
+            return false;
+        }
         if (!ValidateOptionListForCid(object.cid, object.properties, error))
             return false;
         if (object.spliceIndex < -1 || (object.spliceIndex >= 0 && static_cast<std::size_t>(object.spliceIndex) >=
@@ -3766,6 +3783,204 @@ bool BuildRebuiltPayload(const BrxDocument &document, std::vector<std::uint8_t> 
     rebuilt.insert(rebuilt.end(), world.Bytes().begin(), world.Bytes().end());
     rebuilt.resize((rebuilt.size() + 15u) & ~std::size_t(15u), 0);
     rebuilt.insert(rebuilt.end(), rebuiltTextures.begin(), rebuiltTextures.end());
+    // content.cpp locates PLOC relative to EOF. Keep its complete string table
+    // and trailer after the rebuilt textures; no absolute offsets need fixing.
+    std::vector<std::uint8_t> checkedFooter;
+    if (!BrxDocument::ExtractLocalizationFooter(document.LocalizationFooter(), checkedFooter, error))
+        return false;
+    if (checkedFooter != document.LocalizationFooter())
+    {
+        error = "The localization footer contains unrecognized leading data.";
+        return false;
+    }
+    rebuilt.insert(rebuilt.end(), checkedFooter.begin(), checkedFooter.end());
+    return true;
+}
+
+bool BuildExportPayload(const BrxDocument &document, std::vector<std::uint8_t> &output, std::string &error)
+{
+    if (document.Languages().empty())
+        return BuildRebuiltPayload(document, output, error);
+    std::vector<std::vector<std::uint8_t>> payloads;
+    std::uint32_t languageMask = 0;
+    for (const auto &language : document.Languages())
+    {
+        if (language.languageId > 4 || (languageMask & (1u << language.languageId)) != 0 || !language.payload)
+        {
+            error = "The multilingual world has missing or duplicate language data.";
+            return false;
+        }
+        languageMask |= 1u << language.languageId;
+        payloads.emplace_back();
+        auto &payload = payloads.back();
+        if (language.languageId == document.DefaultLanguage())
+        {
+            if (std::any_of(language.subtitles.begin(), language.subtitles.end(),
+                            [](const auto &line) { return line.modified; }) ||
+                std::any_of(language.voiceLines.begin(), language.voiceLines.end(),
+                            [](const auto &line) { return line.modified; }))
+            {
+                error = "Default-language subtitle edits must belong to the editable world, not a translation overlay.";
+                return false;
+            }
+            if (!BuildRebuiltPayload(document, payload, error))
+                return false;
+            if (!language.canonicalAttempted)
+            {
+                BrxDocument original;
+                std::string comparisonError;
+                std::vector<std::uint8_t> canonical;
+                if (original.OpenPayloadBytes(*language.payload, comparisonError) &&
+                    BuildRebuiltPayload(original, canonical, comparisonError))
+                    language.canonicalPayload =
+                        std::make_shared<const std::vector<std::uint8_t>>(std::move(canonical));
+                // A repaired source may now serialize even though its original
+                // world could not. Keep that existing export path available.
+                language.canonicalAttempted = true;
+            }
+            if (language.canonicalPayload && payload == *language.canonicalPayload)
+                payload = *language.payload; // No authored changes in the default world.
+            else
+            {
+                // The outer PUNI round trip preserves reopened raw languages.
+                // It cannot prove stability of a changed default-world rebuild:
+                // that reopened world now counts as an unchanged input. Check
+                // its v17 serialization explicitly before wrapping it.
+                BrxDocument checked;
+                std::vector<std::uint8_t> canonical;
+                if (!checked.OpenPayloadBytes(payload, error) || !BuildRebuiltPayload(checked, canonical, error))
+                    return false;
+                if (canonical != payload)
+                {
+                    error = "The edited default-language world is not serialization-stable after reopening.";
+                    return false;
+                }
+            }
+        }
+        else if (std::any_of(language.subtitles.begin(), language.subtitles.end(),
+                             [](const auto &line) { return line.modified; }) ||
+                 std::any_of(language.voiceLines.begin(), language.voiceLines.end(),
+                             [](const auto &line) { return line.modified; }))
+        {
+            BrxDocument localized;
+            if (!localized.OpenPayloadBytes(*language.payload, error))
+                return false;
+            if (std::any_of(localized.Sections().begin(), localized.Sections().end(),
+                            [](const auto &section) { return section.state == BrxSectionState::Pending; }))
+            {
+                error = "An edited language world is only partially decoded; refusing a lossy rebuild.";
+                return false;
+            }
+            std::unordered_set<std::uint64_t> editedEvents;
+            bool textChanged = false;
+            for (const auto &line : language.subtitles)
+            {
+                if (!line.modified)
+                    continue;
+                const auto key = (static_cast<std::uint64_t>(line.objectIndex) << 32u) | line.eventIndex;
+                if (!editedEvents.insert(key).second || line.objectIndex >= localized.Objects().size())
+                {
+                    error = "A localized subtitle has an invalid DIALOG index.";
+                    return false;
+                }
+                auto &object = localized.EditableObjects()[line.objectIndex];
+                if (!object.dialog.present || object.proxyClone || object.oid != line.dialogOid ||
+                    line.eventIndex >= object.dialog.events.size() ||
+                    object.dialog.events[line.eventIndex].kind != BrxDialogEventKind::Talk ||
+                    line.subtitle.size() > 65535u || line.subtitle.find('\0') != std::string::npos)
+                {
+                    error = "A localized subtitle does not match its preserved Talk event or exceeds the native limit.";
+                    return false;
+                }
+                auto &subtitle = object.dialog.events[line.eventIndex].subtitle;
+                textChanged |= subtitle != line.subtitle;
+                subtitle = line.subtitle;
+            }
+            for (const auto &line : language.voiceLines)
+            {
+                if (!line.modified) continue;
+                const auto key = (static_cast<std::uint64_t>(line.objectIndex) << 32u) | line.eventIndex;
+                if (!editedEvents.insert(key).second || line.objectIndex >= localized.Objects().size() ||
+                    !BrxDocument::ValidateDialogVoiceResource(line.resourceName, error))
+                { if (error.empty()) error = "A localized voice edit has an invalid or duplicate event."; return false; }
+                auto &object = localized.EditableObjects()[line.objectIndex];
+                if (!object.dialog.present || object.proxyClone || object.oid != line.dialogOid ||
+                    line.eventIndex >= object.dialog.events.size() ||
+                    object.dialog.events[line.eventIndex].kind != BrxDialogEventKind::PreloadAudio)
+                { error = "A localized voice edit does not match its preserved Preload audio event."; return false; }
+                auto &resource = object.dialog.events[line.eventIndex].resourceName;
+                textChanged |= resource != line.resourceName;
+                resource = line.resourceName;
+            }
+            if (!textChanged)
+            {
+                // A project can contain a redundant edit equal to the original
+                // text. It must not cause an otherwise untouched world rewrite.
+                payload = *language.payload;
+            }
+            else
+            {
+                if (!BuildRebuiltPayload(localized, payload, error))
+                {
+                    error = std::string(BrxDocument::LanguageName(language.languageId)) + ": " + error;
+                    return false;
+                }
+                // Validate edited language worlds too, not only the default world
+                // which OpenReadOnly selects from the final PUNI container.
+                BrxDocument checked;
+                std::vector<std::uint8_t> canonical;
+                if (!checked.OpenPayloadBytes(payload, error) || !BuildRebuiltPayload(checked, canonical, error))
+                    return false;
+                if (canonical != payload)
+                {
+                    error = "An edited language world is not serialization-stable after reopening.";
+                    return false;
+                }
+            }
+        }
+        else
+            payload = *language.payload; // Untouched language: preserve every byte.
+        if (payload.empty() || payload.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+        {
+            error = "A language world exceeds the PUNI chunk size limit.";
+            return false;
+        }
+    }
+    if (document.DefaultLanguage() > 4 || (languageMask & (1u << document.DefaultLanguage())) == 0)
+    {
+        error = "The multilingual world's default language is missing.";
+        return false;
+    }
+    PayloadWriter writer;
+    writer.Pod(kPcbrMagic);
+    writer.Pod(std::uint32_t{19});
+    writer.Pod(std::uint32_t{0x494e5550}); // PUNI, transition.cpp schema 1.
+    writer.Pod(std::uint32_t{1});
+    writer.Pod(static_cast<std::uint32_t>(payloads.size()));
+    writer.Pod(document.DefaultLanguage());
+    writer.Pod(static_cast<std::uint32_t>(payloads.size()));
+    for (std::size_t index = 0; index < payloads.size(); ++index)
+    {
+        writer.Pod(document.Languages()[index].languageId);
+        writer.Pod(static_cast<std::uint64_t>(payloads[index].size()));
+        writer.Pod(std::uint32_t{1}); // One complete v17 chunk per language.
+        writer.Pod(static_cast<std::uint32_t>(index));
+    }
+    for (const auto &payload : payloads)
+    {
+        std::uint32_t crc = 0xffffffffu;
+        for (const auto byte : payload)
+        {
+            crc ^= byte;
+            for (int bit = 0; bit < 8; ++bit)
+                crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+        }
+        writer.Pod(static_cast<std::uint32_t>(payload.size()));
+        writer.Pod(~crc);
+        writer.Bytes(payload.data(), payload.size());
+    }
+    output = writer.Bytes();
+    error.clear();
     return true;
 }
 
@@ -3806,6 +4021,8 @@ bool WritePayloadFile(const std::vector<std::uint8_t> &payload, const std::files
     }
     return true;
 }
+
+#include "DialogWaveExport.inc"
 
 std::vector<std::string> BuildObjectHierarchySignatures(const BrxDocument &document)
 {
@@ -3852,7 +4069,7 @@ BrxCompilePlan BrxCompiler::Analyze(const BrxDocument &document, const Validatio
     plan.cidLayoutsAudited = VerifyCidWriterCoverage(document, cidCoverageError);
     std::vector<std::uint8_t> rebuilt;
     std::string rebuiltError;
-    plan.writerAvailable = plan.cidLayoutsAudited && BuildRebuiltPayload(document, rebuilt, rebuiltError);
+    plan.writerAvailable = plan.cidLayoutsAudited && BuildExportPayload(document, rebuilt, rebuiltError);
     if (!plan.cidLayoutsAudited && !cidCoverageError.empty())
         plan.blockers.emplace_back("CID writer layout audit: " + cidCoverageError);
     if (!plan.writerAvailable && !rebuiltError.empty())
@@ -3871,7 +4088,7 @@ bool BrxCompiler::WriteRebuiltPayload(const BrxDocument &document, const Validat
         return false;
     }
     std::vector<std::uint8_t> rebuilt;
-    if (!BuildRebuiltPayload(document, rebuilt, error))
+    if (!BuildExportPayload(document, rebuilt, error))
         return false;
     auto validationPath = destination;
     validationPath += ".pcbrx-validation-" + std::to_string(HashBytes(rebuilt)) + ".tmp";
@@ -3910,7 +4127,7 @@ bool BrxCompiler::WriteRebuiltPayload(const BrxDocument &document, const Validat
     // while correctly ignoring loader-only PROXY materialization.
     std::vector<std::uint8_t> canonicalRebuild;
     std::string canonicalError;
-    if (!BuildRebuiltPayload(reopened, canonicalRebuild, canonicalError))
+    if (!BuildExportPayload(reopened, canonicalRebuild, canonicalError))
     {
         reopened.Close();
         discardValidationFile();
@@ -3932,7 +4149,9 @@ bool BrxCompiler::WriteRebuiltPayload(const BrxDocument &document, const Validat
     // the open/closed staging path.  Windows can reject that rename when a
     // shell extension, antivirus scanner, or stale file handle observes the
     // temporary file, which previously left the user with no exported BRX.
-    if (!WritePayloadFile(rebuilt, destination, error))
+    // Publish only newly named WAV assets before the BRX can reference them.
+    // Existing differing files are never overwritten, in any language.
+    if (!ExportDialogWaves(document, destination, error) || !WritePayloadFile(rebuilt, destination, error))
     {
         discardValidationFile();
         return false;

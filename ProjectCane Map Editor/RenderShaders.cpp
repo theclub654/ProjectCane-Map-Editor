@@ -78,6 +78,7 @@ uniform int uInstanceMode;
 struct GlobInstance {
     mat4 model;
     vec4 objectCenter;
+    vec4 lightingSphere;
 };
 layout(std430, binding = 9) readonly buffer GlobInstanceBuffer {
     GlobInstance globInstances[];
@@ -89,6 +90,7 @@ uniform int uActiveLightIndices[MAX_LIGHTS];
 uniform int uDynamicObject;
 uniform vec3 uObjectCenter;
 uniform float uObjectRadius;
+uniform vec4 uLightingSphere;
 struct LightBlock {
     ivec4 meta;
     vec4 position;
@@ -126,8 +128,10 @@ void main() {
     vec4 instanceCenter = uInstanceMode != 0
         ? globInstances[gl_InstanceID].objectCenter
         : vec4(uObjectCenter, uObjectRadius);
-    vec3 objectCenter = instanceCenter.xyz;
-    float objectRadius = instanceCenter.w;
+    vec4 lightingSphere = uInstanceMode != 0
+        ? globInstances[gl_InstanceID].lightingSphere : uLightingSphere;
+    vec3 objectCenter = lightingSphere.xyz;
+    float objectRadius = lightingSphere.w;
     vec4 worldPosition = model * vec4(aPosition, 1.0);
     // Retail glob.vert uses mat3(op.model) directly.  Keep editor placement,
     // RTCK and animation preview lighting on the same convention.
@@ -137,7 +141,7 @@ void main() {
     vColor = aColor;
     vUv = aUv;
     vBoneWeightPreview = aBoneWeightPreview;
-    vObjectSphere = vec4(objectCenter, objectRadius);
+    vObjectSphere = instanceCenter;
     vAmbient = 0.0;
     vMidtone = aColor.rgb;
     vHighlight = vec3(0.0);

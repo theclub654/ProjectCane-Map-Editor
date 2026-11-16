@@ -2140,6 +2140,215 @@ EditorOperationResult EditorDocumentOperations::CreateExit(BrxDocument &document
     return result;
 }
 
+EditorOperationResult EditorDocumentOperations::SetVolumePrism(BrxDocument &document,
+    const std::int32_t ownerObjectIndex, const std::vector<std::array<float, 2>> &outline,
+    const float bottom, const float top)
+{
+    EditorOperationResult result;
+    result.message = "Volume needs 3-64 convex outline points and finite bottom < top.";
+    if (!ValidObjectIndex(document, ownerObjectIndex) || outline.size() < 3 || outline.size() > 64 ||
+        !std::isfinite(bottom) || !std::isfinite(top) || !std::isfinite(top - bottom) || top - bottom < 0.01f)
+        return result;
+    auto &object = document.EditableObjects()[static_cast<std::size_t>(ownerObjectIndex)];
+    if (object.proxyClone)
+    {
+        result.message = "Make the linked hierarchy unique before replacing its volume.";
+        return result;
+    }
+    auto volume = std::find_if(document.EditableVolumes().begin(), document.EditableVolumes().end(),
+        [&](const BrxVolumeRecord &v) { return v.ownerObjectIndex == ownerObjectIndex; });
+    const bool planeVolume = volume != document.EditableVolumes().end();
+    const bool supportedSo = object.cid == 31 || object.cid == 41 || object.cid == 42 ||
+        object.cid == 50 || object.cid == 52 || object.cid == 54 || object.cid == 55;
+    if (!planeVolume && (!supportedSo || !object.so.present))
+    {
+        result.message = "This object has no supported editable volume payload.";
+        return result;
+    }
+    std::vector<glm::vec2> points;
+    double area = 0.0;
+    for (std::size_t i = 0; i < outline.size(); ++i)
+    {
+        const auto &a = outline[i], &b = outline[(i + 1) % outline.size()];
+        if (!std::isfinite(a[0]) || !std::isfinite(a[1]))
+            return result;
+        points.emplace_back(a[0], a[1]);
+        area += static_cast<double>(a[0]) * b[1] - static_cast<double>(b[0]) * a[1];
+    }
+    if (!std::isfinite(area) || std::abs(area) < 0.01)
+        return result;
+    if (area < 0.0)
+        std::reverse(points.begin(), points.end());
+    const std::size_t n = points.size();
+    // Every other point must be strictly behind every directed boundary edge.
+    // This rejects duplicate/collinear points, concave outlines and self-crossings.
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const glm::vec2 edge = points[(i + 1) % n] - points[i];
+        for (std::size_t j = 0; j < n; ++j)
+            if (j != i && j != (i + 1) % n)
+            {
+                const glm::vec2 delta = points[j] - points[i];
+                const float side = edge.x * delta.y - edge.y * delta.x;
+                if (!std::isfinite(side) || side <= 0.001f)
+                {
+                    result.message = "Outline must be convex, without duplicate or straight-line corners. Use separate volumes for a concave area.";
+                    return result;
+                }
+            }
+    }
+    const glm::mat4 world = glm::make_mat4(object.worldTransform);
+    for (int column = 0; column < 4; ++column)
+        for (int row = 0; row < 4; ++row)
+            if (!std::isfinite(world[column][row]))
+            {
+                result.message = "Volume transform must be finite.";
+                return result;
+            }
+    const float determinant = glm::determinant(world);
+    if (!std::isfinite(determinant) || determinant <= 0.000001f)
+    {
+        result.message = "Volume needs a finite, non-mirrored, invertible object transform.";
+        return result;
+    }
+    BrxVolumeRecord planes;
+    planes.ownerObjectIndex = ownerObjectIndex;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const glm::vec2 edge = points[(i + 1) % n] - points[i];
+        if (!std::isfinite(glm::dot(edge, edge)) || glm::dot(edge, edge) <= 0.000001f)
+            return result;
+        const glm::vec2 normal = glm::normalize(glm::vec2(edge.y, -edge.x));
+        const float distance = glm::dot(normal, points[i]);
+        if (!std::isfinite(distance)) return result;
+        planes.planes.push_back({distance, {normal.x, normal.y, 0.0f}});
+    }
+    planes.planes.push_back({top, {0, 0, 1}});
+    planes.planes.push_back({-bottom, {0, 0, -1}});
+    for (std::size_t i = 0; i < planes.planes.size(); ++i)
+        planes.nodes.push_back({static_cast<std::uint16_t>(i),
+            i + 1 < planes.planes.size() ? static_cast<std::uint16_t>(i + 1) : std::uint16_t(0xffff),
+            std::uint16_t(0xffff)});
+    if (planeVolume)
+        *volume = std::move(planes);
+    else
+    {
+        BrxSoGeometryInfo geometry;
+        std::vector<glm::vec3> corners;
+        glm::vec3 lower((std::numeric_limits<float>::max)());
+        glm::vec3 upper((std::numeric_limits<float>::lowest)());
+        const glm::vec3 origin = object.so.fixedPhysics ? glm::vec3(world[3]) : glm::vec3(0.0f);
+        for (int layer = 0; layer < 2; ++layer)
+            for (const auto &point : points)
+            {
+                glm::vec3 p(point, layer ? top : bottom);
+                if (object.so.fixedPhysics)
+                    p = glm::vec3(world * glm::vec4(p, 1.0f));
+                if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
+                {
+                    result.message = "Transformed volume coordinates are not finite.";
+                    return result;
+                }
+                corners.push_back(p);
+                geometry.positions.push_back({p.x, p.y, p.z});
+                lower = glm::min(lower, p);
+                upper = glm::max(upper, p);
+                const float radius = glm::length(p - origin);
+                if (!std::isfinite(radius)) return result;
+                geometry.radius = (std::max)(geometry.radius, radius);
+            }
+        // One outward-facing polygon per plane, as in the existing WATER box.
+        std::vector<std::vector<std::uint16_t>> faces;
+        std::vector<std::uint16_t> cap;
+        for (std::size_t i = n; i-- > 0;)
+            cap.push_back(static_cast<std::uint16_t>(i));
+        faces.push_back(cap);
+        cap.clear();
+        for (std::size_t i = 0; i < n; ++i)
+            cap.push_back(static_cast<std::uint16_t>(n + i));
+        faces.push_back(cap);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const auto j = (i + 1) % n;
+            faces.push_back({static_cast<std::uint16_t>(i), static_cast<std::uint16_t>(j),
+                static_cast<std::uint16_t>(n + j), static_cast<std::uint16_t>(n + i)});
+        }
+        std::vector<BrxCollisionTriangle> triangles;
+        struct EdgeOwner { std::size_t face; std::size_t edge; };
+        std::unordered_map<std::uint32_t, EdgeOwner> edges;
+        for (std::size_t f = 0; f < faces.size(); ++f)
+        {
+            const auto &loop = faces[f];
+            BrxSoGeometryInfo::Surface surface;
+            surface.positionIndices = {loop[0], loop[1], loop[2]};
+            glm::vec3 center(0.0f);
+            for (auto index : loop) center += corners[index];
+            center /= static_cast<float>(loop.size());
+            surface.center = {center.x, center.y, center.z};
+            for (auto index : loop)
+                surface.radius = (std::max)(surface.radius, glm::length(corners[index] - center));
+            geometry.surfaces.push_back(std::move(surface));
+            for (std::size_t e = 0; e < loop.size(); ++e)
+            {
+                const auto a = loop[e], b = loop[(e + 1) % loop.size()];
+                const std::uint32_t key = (std::uint32_t((std::min)(a,b)) << 16u) | (std::max)(a,b);
+                const auto found = edges.find(key);
+                if (found == edges.end())
+                {
+                    auto &stored = geometry.surfaces[f].edges;
+                    edges.emplace(key, EdgeOwner{f, stored.size()});
+                    stored.push_back({a, b, static_cast<std::uint16_t>(f)});
+                }
+                else
+                {
+                    geometry.surfaces[found->second.face].edges[found->second.edge].adjacentSurface =
+                        static_cast<std::uint16_t>(f);
+                    edges.erase(found);
+                }
+            }
+            geometry.bspNodes.push_back({static_cast<std::uint16_t>(f),
+                f + 1 < faces.size() ? static_cast<std::uint16_t>(f + 1) : std::uint16_t(0xffff),
+                std::uint16_t(0xffff)});
+            for (std::size_t j = 1; j + 1 < loop.size(); ++j)
+            {
+                BrxCollisionTriangle triangle;
+                triangle.ownerObjectIndex = ownerObjectIndex;
+                const std::uint16_t indices[]{loop[0], loop[j], loop[j + 1]};
+                for (int v = 0; v < 3; ++v)
+                {
+                    glm::vec3 p = corners[indices[v]];
+                    if (!object.so.fixedPhysics) p = glm::vec3(world * glm::vec4(p, 1.0f));
+                    for (int axis = 0; axis < 3; ++axis) triangle.positions[v][axis] = p[axis];
+                }
+                triangles.push_back(triangle);
+            }
+        }
+        geometry.positionCount = static_cast<std::uint16_t>(corners.size());
+        geometry.surfaceCount = static_cast<std::uint16_t>(faces.size());
+        geometry.edgeCount = static_cast<std::uint16_t>(3 * n);
+        geometry.fullBspNodeCount = static_cast<std::uint16_t>(faces.size());
+        for (int axis = 0; axis < 3; ++axis)
+        { geometry.boundsMin[axis] = lower[axis]; geometry.boundsMax[axis] = upper[axis]; }
+        object.so.collisionGeometry = std::move(geometry);
+        object.so.bspNodeToCameraGroup.assign(faces.size(), -1);
+        object.so.hitSurfaceGroups.clear();
+        object.so.surfaceToHitSurfaceGroup.clear();
+        object.so.modified = true;
+        // Remove the native sphere override: its presence changes containment
+        // semantics in VOLZP/VOLBTN. Camera collision is deliberately untouched.
+        std::erase_if(object.properties, [](const BrxPropertyRecord &p) { return p.eopid == 133; });
+        auto &existing = document.EditableCollisionTriangles();
+        std::erase_if(existing, [&](const BrxCollisionTriangle &t)
+            { return t.ownerObjectIndex == ownerObjectIndex && !t.cameraGeometry; });
+        existing.insert(existing.end(), triangles.begin(), triangles.end());
+    }
+    result.succeeded = true;
+    result.primaryObjectIndex = ownerObjectIndex;
+    result.affectedObjectIndices.push_back(ownerObjectIndex);
+    result.message = "Applied a closed convex volume. Use Transform to move, rotate or scale it; undo restores the previous shape.";
+    return result;
+}
+
 EditorOperationResult EditorDocumentOperations::CreateVolume(BrxDocument &document, const std::int32_t parentIndex,
                                                              const float *worldTransform)
 {
@@ -2996,6 +3205,141 @@ EditorOperationResult EditorDocumentOperations::MoveEmbeddedWarpAseg(BrxDocument
     result.primaryObjectIndex = targetIndex;
     result.affectedObjectIndices = {asegObjectIndex, targetIndex};
     result.message = direction < 0 ? "Moved embedded ASEG earlier." : "Moved embedded ASEG later.";
+    return result;
+}
+
+EditorOperationResult EditorDocumentOperations::DeleteGlob(BrxDocument &document, const std::size_t globIndex)
+{
+    EditorOperationResult result;
+    const auto fail = [&](const char *message) { result.message = message; return result; };
+    if (globIndex >= document.Globs().size()) return fail("The GLOB no longer exists.");
+    const auto ownerIndex = document.Globs()[globIndex].ownerObjectIndex;
+    const auto renderGroup = document.Globs()[globIndex].renderGroup;
+    if (!ValidObjectIndex(document, ownerIndex)) return fail("The GLOB has no valid owner.");
+    const auto &owner = document.Objects()[ownerIndex];
+    if (owner.proxyClone || owner.proxyRecordIndex >= 0)
+        return fail("Make the linked PROXY hierarchy unique before deleting its GLOBs.");
+    std::size_t setIndex = document.Globsets().size(), slot = 0, memberships = 0;
+    for (std::size_t index = 0; index < document.Globsets().size(); ++index)
+        for (std::size_t local = 0; local < document.Globsets()[index].globIndices.size(); ++local)
+            if (document.Globsets()[index].globIndices[local] == globIndex)
+            {
+                setIndex = index; slot = local; ++memberships;
+            }
+    if (memberships != 1 || document.Globsets()[setIndex].ownerObjectIndex != ownerIndex)
+        return fail("The GLOBSET ownership is invalid; nothing was deleted.");
+    for (std::size_t index = 0; index < document.Globs().size(); ++index)
+        if (document.Globs()[index].instanced && document.GlobSourceRecordIndex(index) == globIndex)
+            return fail("Other GLOB instances use this source. Make those instances unique before deleting it.");
+    const auto oldCount = document.Globsets()[setIndex].globIndices.size();
+    for (const auto index : document.Globsets()[setIndex].globIndices)
+    {
+        if (index >= document.Globs().size()) return fail("The owning GLOBSET contains an invalid record.");
+        const auto &glob = document.Globs()[index];
+        if (glob.ownerObjectIndex != ownerIndex) return fail("The owning GLOBSET contains another object's GLOB.");
+        if (glob.instanced && document.GlobSourceRecordIndex(index) >= document.Globs().size())
+            return fail("The owning GLOBSET contains an invalid instance source.");
+    }
+    for (const auto &group : owner.so.cameraGroups)
+        if (group.globIndex == slot)
+            return fail("Camera collision references this GLOB. Change that mapping before deleting it.");
+    for (const auto &group : owner.so.hitSurfaceGroups)
+        if (group.globIndex >= 0 && static_cast<std::size_t>(group.globIndex) == slot)
+            return fail("A hit-surface mapping references this GLOB. Change that mapping before deleting it.");
+    // All checks precede mutation. Native instance and SO mapping indices are
+    // local GLOBSET slots; document indices are a separate editor namespace.
+    for (const auto index : document.Globsets()[setIndex].globIndices)
+    {
+        auto &glob = document.EditableGlobs()[index];
+        if (glob.instanced && glob.sourceGlobIndex > static_cast<std::int32_t>(slot))
+        {
+            --glob.sourceGlobIndex;
+            glob.modified = true;
+        }
+    }
+    auto &payload = document.EditableObjects()[ownerIndex].so;
+    for (auto &group : payload.cameraGroups)
+        if (group.globIndex > slot && group.globIndex < oldCount) --group.globIndex;
+    for (auto &group : payload.hitSurfaceGroups)
+        if (group.globIndex > static_cast<std::int32_t>(slot) && static_cast<std::size_t>(group.globIndex) < oldCount)
+            --group.globIndex;
+    if (payload.present) payload.modified = true;
+    for (auto &set : document.EditableGlobsets())
+    {
+        set.globIndices.erase(std::remove(set.globIndices.begin(), set.globIndices.end(), globIndex), set.globIndices.end());
+        for (auto &index : set.globIndices) if (index > globIndex) --index;
+    }
+    auto &bindings = document.EditableGlobWarps();
+    bindings.erase(std::remove_if(bindings.begin(), bindings.end(), [&](const BrxGlobWarpRecord &binding)
+        { return binding.ownerObjectIndex == ownerIndex && binding.renderGroup == renderGroup; }), bindings.end());
+    document.EditableGlobs().erase(document.EditableGlobs().begin() + static_cast<std::ptrdiff_t>(globIndex));
+    document.RebuildRenderPacketsFromGlobs();
+    result.succeeded = true;
+    result.primaryObjectIndex = ownerIndex;
+    result.affectedObjectIndices.push_back(ownerIndex);
+    result.message = "Deleted GLOB. The owning CID object and collision geometry were retained.";
+    return result;
+}
+
+EditorOperationResult EditorDocumentOperations::RemoveMsGlobVisual(BrxDocument &document, const std::size_t globIndex)
+{
+    EditorOperationResult result;
+    const auto fail = [&](const std::string &message)
+    {
+        result.message = message;
+        return result;
+    };
+    if (globIndex >= document.Globs().size())
+        return fail("The model part no longer exists.");
+    const auto ownerIndex = document.Globs()[globIndex].ownerObjectIndex;
+    if (!ValidObjectIndex(document, ownerIndex))
+        return fail("The model part has no valid owner.");
+    const auto &owner = document.Objects()[static_cast<std::size_t>(ownerIndex)];
+    if (owner.cid != 4 || owner.proxyClone || owner.proxyRecordIndex >= 0)
+        return fail("Visual removal is available for directly authored MS parts. Linked PROXY parts must keep their source ownership.");
+    const auto set = std::find_if(document.Globsets().begin(), document.Globsets().end(),
+        [&](const BrxGlobsetRecord &candidate)
+        { return candidate.ownerObjectIndex == ownerIndex &&
+                 std::find(candidate.globIndices.begin(), candidate.globIndices.end(), globIndex) != candidate.globIndices.end(); });
+    if (set == document.Globsets().end())
+        return fail("The model part is not in its owner's GLOBSET.");
+    const auto slot = static_cast<std::size_t>(std::distance(set->globIndices.begin(),
+        std::find(set->globIndices.begin(), set->globIndices.end(), globIndex)));
+    for (std::size_t candidate = 0; candidate < document.Globs().size(); ++candidate)
+        if (document.Globs()[candidate].instanced && document.GlobSourceRecordIndex(candidate) == globIndex)
+            return fail("Other GLOB instances use this part as their source. Make those instances unique before removing this visual.");
+    // SO collision groups contain native local GLOB/SUBGLOB indices. Leaving
+    // those mappings pointed at an empty part would invalidate the payload.
+    for (const auto &group : owner.so.cameraGroups)
+        if (group.globIndex == slot)
+            return fail("A camera-collision group references this part. Edit its collision mapping before removing the visual.");
+    for (const auto &group : owner.so.hitSurfaceGroups)
+        if (group.globIndex >= 0 && static_cast<std::size_t>(group.globIndex) == slot)
+            return fail("A hit-surface group references this part. Edit its collision mapping before removing the visual.");
+    const auto &original = document.Globs()[globIndex];
+    if (original.hasWarp || std::any_of(document.GlobWarps().begin(), document.GlobWarps().end(),
+        [&](const BrxGlobWarpRecord &binding)
+        { return binding.ownerObjectIndex == ownerIndex && binding.renderGroup == original.renderGroup; }))
+        return fail("This part has a warp binding. Remove its deformation setup before removing the visual.");
+    if (original.instanced)
+    {
+        std::string error;
+        if (!document.MakeGlobUnique(globIndex, &error))
+            return fail(error);
+    }
+    auto &glob = document.EditableGlobs()[globIndex];
+    // LoadGlobsetFromBrx supports zero SUBGLOB/CEL counts. Keep every native
+    // slot, OID and GLOBSET binding stable rather than renumbering the map.
+    glob.sourceSubglobs.clear();
+    glob.sourceCelRecords.clear();
+    glob.derivedBatches.clear();
+    glob.derivedCelPackets.clear();
+    glob.modified = true;
+    document.RebuildRenderPacketsFromGlobs();
+    result.succeeded = true;
+    result.primaryObjectIndex = ownerIndex;
+    result.affectedObjectIndices.push_back(ownerIndex);
+    result.message = "Removed the MS part's visual geometry. Its native slot, owning object and shared collision remain unchanged.";
     return result;
 }
 

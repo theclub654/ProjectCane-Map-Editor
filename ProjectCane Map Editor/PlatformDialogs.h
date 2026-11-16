@@ -18,6 +18,8 @@ void SetWindowsApplicationIcon(GLFWwindow *window);
                                                       bool baked);
 [[nodiscard]] std::filesystem::path ChooseCharacterGlbSaveFile(GLFWwindow *window, const std::string &suggestedName);
 [[nodiscard]] std::filesystem::path ChooseNamedGlbSaveFile(GLFWwindow *window, const std::string &suggestedName);
+[[nodiscard]] std::filesystem::path ChooseModelSaveFile(GLFWwindow *window, const std::string &suggestedName,
+                                                       bool obj);
 [[nodiscard]] std::filesystem::path ChooseExportFolder(GLFWwindow *window, const wchar_t *title);
 [[nodiscard]] std::filesystem::path ChooseTextureFile(GLFWwindow *window);
 [[nodiscard]] std::filesystem::path ChooseStaticModelFile(GLFWwindow *window);

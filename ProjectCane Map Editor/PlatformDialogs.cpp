@@ -179,6 +179,25 @@ std::filesystem::path ChooseNamedGlbSaveFile(GLFWwindow *window, const std::stri
     return GetSaveFileNameW(&dialog) ? std::filesystem::path(fileName) : std::filesystem::path{};
 }
 
+std::filesystem::path ChooseModelSaveFile(GLFWwindow *window, const std::string &suggestedName, const bool obj)
+{
+    if (!obj)
+        return ChooseNamedGlbSaveFile(window, suggestedName);
+    wchar_t fileName[32768]{};
+    std::wstring suggested(suggestedName.begin(), suggestedName.end());
+    suggested += L".obj";
+    std::copy_n(suggested.data(), (std::min)(suggested.size(), std::size(fileName) - 1), fileName);
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = window != nullptr ? glfwGetWin32Window(window) : nullptr;
+    dialog.lpstrFilter = L"Wavefront OBJ (*.obj)\0*.obj\0All files (*.*)\0*.*\0";
+    dialog.lpstrFile = fileName;
+    dialog.nMaxFile = static_cast<DWORD>(std::size(fileName));
+    dialog.lpstrDefExt = L"obj";
+    dialog.Flags = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_OVERWRITEPROMPT;
+    return GetSaveFileNameW(&dialog) ? std::filesystem::path(fileName) : std::filesystem::path{};
+}
+
 std::filesystem::path ChooseExportFolder(GLFWwindow *window, const wchar_t *title)
 {
     BROWSEINFOW info{};

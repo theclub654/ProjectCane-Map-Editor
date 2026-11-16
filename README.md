@@ -12,6 +12,16 @@ The editor uses ProjectCane's reference source to guide native file layouts and 
 
 Start with **Help > Getting Started** for a step-by-step first edit. Use the top menus to open specialist tools.
 
+### Creating shaped volumes
+
+Use **Closed volumes - start with a box** in the object creation menu for damage regions, pits, activation regions, camera detection, water, collision gates, or a reusable VOL boundary. Existing sphere creation choices are still available.
+
+Select the object and open **Volume shape - create or reshape** in its specialized controls. Draft a box or cylinder, or choose **Draw outline in viewport** and click gameplay collision around the boundary. Backspace removes a corner; Enter finishes the draft; Escape cancels drawing. Set the height and vertical center, inspect the yellow wireframe preview, then enable **Replace current boundary when applying** and click **Apply closed volume**. Drafting alone does not change the exported map. Clear the draft preview when finished.
+
+Outlines must be convex, have 3-64 distinct corners, and are extruded along the object's local Z axis. Split concave areas into separate volumes. Use Transform to move, rotate, or scale the result. The shared controls also work with existing JLOVOL and decoded plane-volume records; they retain links and behavior settings. Replacing an SO boundary replaces gameplay collision and face mappings, removes its sphere override, and retains camera collision. Linked PROXY hierarchies must be made unique first.
+
+Pit VOLZP regions require a closed collision volume and pit damage mode. The box pit creation choice configures both; for an existing VOLZP, apply the shape before choosing **Death surface**. ProjectCane tests for a falling player fully inside the pit. Configure recovery targets separately. A VOL boundary alone does not add gameplay behavior; it must be referenced by the appropriate object.
+
 **AI / MCP:** optional local MCP integration exposes live records, all 148 CID schemas, source evidence, native operation previews, imports/exports and Undo/Redo. An opt-in image/input path operates existing specialist UI controls. See [setup](MCP.md) and [feature coverage](MCP-Coverage.md). Enable it under **Help > AI / MCP Connection** in a build containing the integration.
 
 - **Scene** on the left lists the level's objects. Search by name, type, or object ID; right-click an entry for hierarchy actions.
@@ -24,11 +34,54 @@ Start with **Help > Getting Started** for a step-by-step first edit. Use the top
 
 Selecting an object focuses its hierarchy on the left; clear selection to return to the world tree. Friendly labels and guidance do not change native IDs, property tokens or file layouts. Existing custom object names are preserved.
 
+Double-click an editable number in a drag field or horizontal slider to type an exact value, then press Enter. This includes emitter ranges, vector components, transforms and other CID settings; dragging and Ctrl-click entry remain available. For an unchecked **source default** or **game default** setting, enable its override checkbox first. Read-only fields stay locked, and existing validation and input-clamping rules still apply.
+
+### PAL dialogue languages
+
+For a multilingual PCBRX v18/v19 level, open **Dialog Manager > PAL dialogue languages (subtitles & voices)**, choose an available language, select a DIALOG/Talk event and edit **Subtitle text**. English, French, German, Spanish and Italian are supported when present in the input. Each language lists its own events; matching event numbers in different languages are not assumed to identify the same line. Undo/Redo tracks subtitle edits, and **Restore original translation** resets a non-default line.
+
+Under **Voice clips (Preload audio events)**, select an event and use **Apply existing resource** to reassign its native 32-byte filename, or **Import replacement WAV...** to stage a new clip just for that language. A Preload event can cover several Talk lines; replacing audio does not generate timing or lipsync. Imports accept ProjectCane-compatible integer PCM WAVs, including extensible PCM. Floating-point/compressed WAV audio must be converted to integer PCM first.
+
+Imported clips use unique language/content-based filenames, are included in new `.caneproject` saves, and participate in Undo/Redo. **Export rebuilt edited PCBRX** writes imported files beside the exported level under `English/Dialogs`, `French/Dialogs`, etc., matching ProjectCane's localized resolver (including legacy levels already inside a language folder). Deploy those WAV files along with the BRX. Original external voice files are not embedded automatically or overwritten. Identical existing imported files are reused; a differing file at the generated destination blocks export. Existing resource assignments require their external WAVs in the corresponding language's folders.
+
+Voice previews check only the selected language's `Dialogs`/`Commentary` directories; they never fall back to another language. **Choose extracted voice folder...** accepts the level root, a language root, or that language's `Dialogs` folder. Imported clips can be previewed before export. Restoring an original reference leaves the imported bytes staged for project saving and Undo; it does not delete files on disk.
+
+New `.caneproject` saves preserve every language world and its subtitle edits without requiring the source level. **Export rebuilt edited PCBRX** writes a ProjectCane-compatible v19 PUNI container with every original language and the original default selection. Untouched non-default language payloads are copied byte-for-byte. Edited language worlds use the existing structured writer and are reopened and checked for stable serialization before export. Native subtitle lengths remain limited to 65535 bytes; changing text does not translate voice recordings or generate font glyphs.
+
+Translation-only edits also preserve the untouched default language's original payload when its authored-world comparison matches the input. Redundant translation edits equal to the original text do not force a language rebuild. This comparison uses a non-authored cache; inspecting or exporting a language does not itself dirty the editor project.
+
+Project saves also preserve the default world's optional **PLOC** localized UI-string table. Rebuilds retain that footer for edited language worlds as well as the default world. Malformed footers are rejected using ProjectCane's size, count and string-boundary rules. Partially decoded language worlds remain preserved but cannot be edited/rebuilt through the subtitle tool.
+
+The viewport and other world-editing tools continue to edit the default language's world. Geometry, dialogue timing and other world edits are not automatically propagated to the other language worlds. Projects saved by older editor versions did not retain the other languages: reopen the original multilingual PCBRX to use this feature. Hierarchy/portable-PROXY packages contain the selected world's objects, not complete extra language worlds or imported dialogue WAVs; deploy any required voice files separately for those packages.
+
+Enable **Reference lens** in the viewport toolbar to inspect the existing decoded property-reference graph for the selected object's owner. Cyan arrows are outgoing; green arrows are incoming. Dashed amber lines identify type-mismatch candidates, and unresolved references remain in the lens list without invented endpoints. The panel filters by property/object name and controls direction, labels and the viewport line limit. Click a list row or **Alt-click** a viewport connection to inspect the other object. Connections are overlays through geometry. Curves anchor at their first point; non-spatial children may anchor at an ALO ancestor, while records without a spatial anchor remain list-only. This is read-only navigation, not a complete runtime graph: Splice lookups and other implicit dependencies are not inferred. Optional nil and engine-owned targets retain the existing resolver's exclusions.
+
+### Finding parts and understanding ownership
+
+- In the world Scene tree, expand **Object type summary** and check multiple CID types to filter them together. Text search narrows those results further. **Clear all filters** restores the full list. Selecting an object temporarily shows its focused hierarchy so filters cannot hide the selection.
+- Right-click a Scene object and choose **Help for this object** to open its CID guide directly. The Inspector offers the same link under **Tools for this object**.
+- Enable **Select collision** beside **Show collision** in the viewport toolbar, then click a face. The nearest enabled gameplay/camera collision surface is selected, outlined in yellow, and its owner is shown in the Inspector. Turn this mode off to resume model picking. The **Collision ownership** section distinguishes native collision ownership from visual-part selection.
+- **Review dependencies and duplicate...**, available in the Scene context menu and Inspector, lists decoded outgoing property references before using the existing hierarchy duplicate operation. Internal references and shared external targets are distinguished. This review does not resolve every Splice lookup or certify a complete guard setup; test patrol, navigation and script behavior in game.
+- An MS object's **MS components** section lists its individual GLOBs. Select a component to use the existing transform, instance duplication and model export controls. Isolation and visibility controls affect the editor preview. **Remove this MS visual...** removes exported visual geometry while preserving its native slot and shared collision, with Undo support. Removal is blocked for source parts used by other instances, collision mappings, linked PROXY ownership, or warp bindings. Removing visuals does not remove a platform's physical collision. This is component editing within the native MS, not an automatic conversion into independent gameplay objects.
+
 ## Features
 
 - Browse and edit map objects through the viewport, hierarchy, and Inspector.
 - Create, move, duplicate, delete, and replace supported object hierarchies.
 - Edit GLOB/subGLOB geometry, materials, textures, and related properties.
+- Export one GLOB from its hierarchy row: right-click the GLOB and open **Export GLOB...** for GLB/OBJ and placement options.
+- You can also right-click in the viewport with an object or GLOB selected and choose **Export GLOB...**. An object with multiple GLOBs offers a list of its parts.
+- **Delete GLOB...** is available alongside Copy and Export in hierarchy and viewport menus. Confirm to remove the GLOB and all its SUBGLOBs, with Undo support. The CID owner, collision geometry and shared materials/textures stay in place. Direct instance-source and collision-mapping dependencies must be resolved first; linked PROXY hierarchies must be made unique. Surviving native GLOBSET slot references are updated without changing other parts' placement.
+- **Copy GLOB to object...**, available in GLOB hierarchy/viewport context menus and the Inspector, appends an independent static visual to another compatible CID object's GLOBSET while preserving authored world placement. Choose a destination, **Preview copy**, then **Apply copy**. Existing visuals remain, materials/textures stay shared, and collision/scripts are not copied. Undo restores the prior scene. Bone/pose tables, linked PROXY ownership, warps, GLEAM, animated materials, camera tracking and sheared destination frames are excluded; the preview explains incompatibilities. Render bounds may expand to include the new visual. No new CID object or object OID is created.
+- Export one model without removing the rest of the map: right-click its thumbnail in **Asset Browser > Models**,
+  or use **Export model...** in the Inspector's Model page. Choose **GLB** (embedded textures; rig when present)
+  or **OBJ** (matching MTL and PNG files). Individual GLOB controls export all that GLOB's SUBGLOBs;
+  model-group controls export the complete GLOBSET. Model-local coordinates are the default; world placement is optional.
+  Exports contain visual assets, not gameplay, collision or animation clips. OBJ is a static bind-pose mesh.
+  Keep its companion files together. For static reimport, set **Game scale** to **1**; set **Flip texture V**
+  off for GLB or on for OBJ. OBJ retains the game's Z-up axes; GLB uses a Y-up scene root for external tools.
+  Static GLB reimport does not recreate the exported rig or skin weights. Vertex colors are retained by both
+  import paths. OBJ companion filenames include an identity suffix so similarly named exports do not share them.
 - Import models, including FBX meshes, skeletons, skin weights, and animation through the supported import paths.
 - Import standalone textures as RGBA8, BC1, or BC3. BC1 is treated as opaque by the game; use BC3 or RGBA8 for transparency.
 - Author visibility zones, inspect BSP structures, and test visibility through the Visibility & Zones tools.

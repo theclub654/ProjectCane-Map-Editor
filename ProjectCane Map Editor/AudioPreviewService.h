@@ -17,6 +17,8 @@ class AudioPreviewService
 
     void SetDocumentPath(const std::filesystem::path &documentPath);
     void SetAdditionalSearchRoot(const std::filesystem::path &root);
+    void SetDialogLanguage(std::int32_t language);
+    [[nodiscard]] bool PlayDialogWaveBytes(const std::vector<std::uint8_t> &bytes, std::string &error);
     [[nodiscard]] static std::filesystem::path BrowseForAudioFolder();
     [[nodiscard]] std::filesystem::path ResolveDialogWave(const std::string &resourceName);
     [[nodiscard]] std::filesystem::path ResolveEffectWave(std::int32_t sfxId);
@@ -43,10 +45,14 @@ class AudioPreviewService
 
   private:
     void RebuildIndex();
+    void CleanupTemporaryWave();
+    [[nodiscard]] std::vector<std::filesystem::path> LocalizedDialogCandidates(const std::string &resourceName) const;
 
     std::filesystem::path documentPath_;
     std::filesystem::path additionalSearchRoot_;
     std::filesystem::path playingPath_;
+    std::filesystem::path temporaryWaveDirectory_;
+    std::int32_t dialogLanguage_ = -1;
     std::vector<float> waveform_;
     bool open_ = false;
     float volume_ = 1.0f;

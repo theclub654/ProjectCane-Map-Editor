@@ -4,6 +4,16 @@
 #include <cstdint>
 #include <cstddef>
 
+#ifdef _WIN32
+// Match ProjectCane's GPU preference exports for NVIDIA Optimus and AMD
+// switchable graphics. The OS/driver retains the final adapter choice.
+extern "C"
+{
+__declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
+
 // The native binary readers and current project snapshots use this ABI.
 static_assert(std::endian::native == std::endian::little, "ProjectCane requires a little-endian host.");
 

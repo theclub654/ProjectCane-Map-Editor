@@ -5,17 +5,55 @@
 #include <cstdint>
 #include <filesystem>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 #include <glm/mat4x4.hpp>
 
 class BrxLoader;
 
+struct BrxLocalizedSubtitle
+{
+    std::uint32_t objectIndex = 0;
+    std::uint32_t eventIndex = 0;
+    std::int16_t dialogOid = -1;
+    std::string subtitle;
+    std::string originalSubtitle; // Lazy inspection cache, never serialized.
+    bool modified = false;
+};
+
 struct BrxLanguagePayload
 {
     std::uint32_t languageId = 0;
     std::uint64_t reconstructedSize = 0;
     std::vector<std::uint32_t> chunkIds;
+    // Immutable original v17 world, shared by Undo snapshots. Preserve every
+    // non-dialogue byte when this language has no subtitle edits.
+    std::shared_ptr<const std::vector<std::uint8_t>> payload;
+    std::uint32_t payloadCrc = 0;
+    std::vector<BrxLocalizedSubtitle> subtitles;
+    bool subtitlesLoaded = false;
+    // Non-authored comparison cache. Never written to projects or included in
+    // dirty state; the immutable payload remains the preservation authority.
+    mutable bool canonicalAttempted = false;
+    mutable std::shared_ptr<const std::vector<std::uint8_t>> canonicalPayload;
+    struct VoiceLine
+    {
+        std::uint32_t objectIndex = 0, eventIndex = 0;
+        std::int16_t dialogOid = -1;
+        std::string resourceName, originalResourceName;
+        bool modified = false;
+    };
+    std::vector<VoiceLine> voiceLines;
+    bool voiceLinesLoaded = false;
+};
+
+struct BrxDialogWaveAsset
+{
+    std::uint32_t languageId = 0;
+    std::string resourceName;
+    std::shared_ptr<const std::vector<std::uint8_t>> bytes;
+    std::uint32_t crc = 0;
 };
 
 enum class BrxSectionState
@@ -1148,6 +1186,16 @@ class BrxDocument
 {
   public:
     bool OpenReadOnly(const std::filesystem::path &path, std::string &error);
+    bool OpenPayloadBytes(const std::vector<std::uint8_t> &bytes, std::string &error);
+    bool LoadLanguageSubtitles(std::uint32_t languageId, std::string &error);
+    static bool ValidateDialogVoiceResource(const std::string &name, std::string &error);
+    static bool ValidateDialogWave(const std::vector<std::uint8_t> &bytes, std::string &error);
+    bool ImportDialogWave(std::uint32_t languageId, const std::filesystem::path &path,
+                          std::string &resourceName, std::string &error);
+    [[nodiscard]] const std::vector<BrxDialogWaveAsset> &DialogWaves() const { return dialogWaves_; }
+    [[nodiscard]] std::vector<BrxDialogWaveAsset> &EditableDialogWaves() { return dialogWaves_; }
+    static bool ExtractLocalizationFooter(const std::vector<std::uint8_t> &source,
+                                          std::vector<std::uint8_t> &footer, std::string &error);
     void Close();
 
     [[nodiscard]] bool IsOpen() const
@@ -1178,6 +1226,9 @@ class BrxDocument
     {
         return languages_;
     }
+    [[nodiscard]] std::vector<BrxLanguagePayload> &EditableLanguages() { return languages_; }
+    [[nodiscard]] const std::vector<std::uint8_t> &LocalizationFooter() const { return localizationFooter_; }
+    void RestoreLocalizationFooter(const std::vector<std::uint8_t> &footer) { localizationFooter_ = footer; }
     [[nodiscard]] const std::vector<std::uint8_t> &Payload() const
     {
         return payload_;
@@ -1329,6 +1380,8 @@ class BrxDocument
     bool ApplyGlobGeometryTransform(std::size_t globIndex, const glm::mat4 &delta);
     std::size_t DuplicateGlobAsInstance(std::size_t sourceGlobRecordIndex);
     bool MakeGlobUnique(std::size_t globIndex, std::string *error = nullptr);
+    bool PreviewStaticGlobCopy(std::size_t source, std::int32_t target, std::string &error) const;
+    std::size_t CopyStaticGlobToObject(std::size_t source, std::int32_t target, std::string &error);
     bool ApplyGlobsetPosePreview(std::size_t globsetIndex);
     void RebuildRenderPacketsFromGlobs();
     [[nodiscard]] const std::vector<BrxCollisionTriangle> &CollisionTriangles() const
@@ -1520,14 +1573,19 @@ class BrxDocument
     friend class BrxLoader;
     friend class EditorProject;
     bool MaterializeGlobRenderGeometry(std::size_t globIndex);
+    bool PrepareStaticGlobCopy(std::size_t source, std::int32_t target, BrxGlobRecord &copy,
+                               std::size_t &targetSet, std::string &error) const;
     bool RebuildProjectRenderGeometry();
-    bool OpenReadOnlyInPlace(const std::filesystem::path &path, std::string &error);
+    bool OpenReadOnlyInPlace(const std::filesystem::path &path, std::string &error,
+                             const std::vector<std::uint8_t> *sourceBytes = nullptr);
     std::filesystem::path path_;
     std::uint32_t version_ = 0;
     std::uint64_t fileSize_ = 0;
     std::uint32_t defaultLanguage_ = 0;
     std::uint32_t chunkCount_ = 0;
     std::vector<BrxLanguagePayload> languages_;
+    std::vector<std::uint8_t> localizationFooter_;
+    std::vector<BrxDialogWaveAsset> dialogWaves_;
     std::vector<std::uint8_t> payload_;
     bool payloadValidated_ = false;
     BrxWorldHeader worldHeader_;

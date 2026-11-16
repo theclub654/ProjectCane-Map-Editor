@@ -1233,11 +1233,16 @@ void DrawCreateObjectCatalogPanel(bool &open, BrxDocument &document, EditorWorks
 }
 
 void DrawObjectUseGuidePanel(bool &open, EditorWorkspace &workspace, bool &openCreateObjectCatalog,
-                             bool &openObjectOperations)
+                             bool &openObjectOperations, const std::int16_t requestedCid)
 {
     if (!open)
         return;
     ImGui::SetNextWindowSize(ImVec2(1260.0f, 800.0f), ImGuiCond_FirstUseEver);
+    if (requestedCid >= 0)
+    {
+        ImGui::SetNextWindowCollapsed(false);
+        ImGui::SetNextWindowFocus();
+    }
     if (!ImGui::Begin("CID Object Guide", &open))
     {
         ImGui::End();
@@ -1246,6 +1251,11 @@ void DrawObjectUseGuidePanel(bool &open, EditorWorkspace &workspace, bool &openC
 
     static ImGuiTextFilter filter;
     static std::int16_t selectedCid = 2;
+    if (requestedCid >= 0)
+    {
+        selectedCid = requestedCid;
+        filter.Clear();
+    }
     static bool showCategoryHeaders = true;
     ImGui::TextColored(ImVec4(.35f, 1.0f, .5f, 1.0f), "ProjectCane CID Object Encyclopedia");
     ImGui::TextWrapped(
@@ -1302,6 +1312,8 @@ void DrawObjectUseGuidePanel(bool &open, EditorWorkspace &workspace, bool &openC
         const std::string label = friendlyLabel + "##use" + std::to_string(type.cid);
         if (ImGui::Selectable(label.c_str(), selectedCid == type.cid))
             selectedCid = type.cid;
+        if (requestedCid == type.cid)
+            ImGui::SetScrollHereY(0.5f);
         ImGui::SameLine();
         ImGui::TextDisabled("%s | %d", BrxDocument::ClassName(type.cid), type.cid);
     }
@@ -1311,6 +1323,8 @@ void DrawObjectUseGuidePanel(bool &open, EditorWorkspace &workspace, bool &openC
     ImGui::SameLine();
 
     ImGui::BeginChild("ObjectUseDetails", ImVec2(0.0f, -1.0f), true);
+    if (requestedCid >= 0)
+        ImGui::SetScrollY(0.0f);
     const ObjectTypeDescriptor *selected = workspace.ObjectTypes().Find(selectedCid);
     if (selected == nullptr || !IsGuideCid(selectedCid))
     {
@@ -1326,7 +1340,8 @@ void DrawObjectUseGuidePanel(bool &open, EditorWorkspace &workspace, bool &openC
 
         if (ImGui::BeginTabBar("CidGuideTabs"))
         {
-            if (ImGui::BeginTabItem("Overview & example"))
+            if (ImGui::BeginTabItem("Overview & example", nullptr,
+                                   requestedCid >= 0 ? ImGuiTabItemFlags_SetSelected : 0))
             {
                 ImGui::SeparatorText("What this object is");
                 ImGui::TextWrapped("%s", ObjectSummary(selectedCid));
